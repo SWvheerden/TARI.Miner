@@ -53,6 +53,8 @@ jobs:
       # On a tag push this is the pushed tag; on dispatch it is the tag asked
       # for, which is a required input.
       - id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag='${{ inputs.tag || github.ref_name }}'
           case "$tag" in
@@ -62,11 +64,22 @@ jobs:
               exit 1
               ;;
           esac
+          # Checking here turns an unresolvable ref - most often a tag that
+          # exists upstream but was never pushed to this fork - into one clear
+          # message, instead of a bare git failure inside the checkout action.
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::$GITHUB_REPOSITORY has no tag $tag. Push it first, for example: git push origin $tag"
+            echo "Tags this repository does have:"
+            gh api "repos/$GITHUB_REPOSITORY/tags" --jq '.[].name' | head -20
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          # Fully qualified: an unqualified name would let a branch of the same
+          # name win over the tag.
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
 
       # The tag, version.h, and the HiveOS manifest have to agree. A mismatch
       # here means binaries that report one version inside a package named for
@@ -110,7 +123,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
 
       - name: Build the shipped solver and pool miner for every architecture
         run: |
@@ -156,7 +169,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
 
       # Pinned to a commit: this workflow writes to releases, so a moving tag on
       # a third-party action would be a way into the published binaries.
@@ -226,7 +239,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
 
       - uses: actions/download-artifact@v4
         with:
