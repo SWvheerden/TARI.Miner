@@ -1,0 +1,334 @@
+name: Release
+
+# Builds the three published packages from a release tag and attaches them,
+# with their SHA-256 sums, to that release. The point is provenance: every
+# asset comes from a tagged commit through a logged, public build, rather than
+# from a developer's machine.
+#
+# Triggered automatically when a release is published. It can also be run by
+# hand against an existing tag, in which case it defaults to producing workflow
+# artifacts only, so a manual run cannot overwrite published assets by accident.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, for example v1.1.5
+        required: true
+        type: string
+      upload:
+        description: Also attach the packages to that tag's release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  # sm_120 needs 12.8 or newer. Keep both runners on one version so the two
+  # halves of a release are built by the same compiler.
+  CUDA_VERSION: 12.8.0
+  ARCHES: sm_86 sm_89 sm_120
+
+jobs:
+  resolve:
+    name: Resolve tag and version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      upload: ${{ steps.resolve.outputs.upload }}
+      # Republished as an output because a job's `container.image` cannot read
+      # the workflow `env`, and both runners must use the same toolkit.
+      cuda: ${{ steps.resolve.outputs.cuda }}
+    steps:
+      - id: tag
+        run: |
+          tag='${{ github.event.release.tag_name || inputs.tag }}'
+          if [ -z "$tag" ]; then
+            echo "::error::No tag to build."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      # The tag, version.h, and the HiveOS manifest have to agree. A mismatch
+      # here means binaries that report one version inside a package named for
+      # another, which is exactly the confusion a release must not ship.
+      - id: resolve
+        run: |
+          tag='${{ steps.tag.outputs.tag }}'
+          version="$(sed -n 's/.*TARI_MINER_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' version.h)"
+          manifest="$(sed -n 's/^CUSTOM_VERSION=//p' hiveos/h-manifest.conf)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not read TARI_MINER_VERSION from version.h."
+            exit 1
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag does not match version.h ($version); expected v$version."
+            exit 1
+          fi
+          if [ "$manifest" != "$version" ]; then
+            echo "::error::hiveos/h-manifest.conf is $manifest but version.h is $version."
+            exit 1
+          fi
+          upload='${{ github.event_name == 'release' || inputs.upload }}'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "upload=$upload" >> "$GITHUB_OUTPUT"
+          echo "cuda=$CUDA_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $tag (version $version); upload to release: $upload" >> "$GITHUB_STEP_SUMMARY"
+
+  linux:
+    name: Build Linux backends
+    needs: resolve
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:${{ needs.resolve.outputs.cuda }}-devel-ubuntu22.04
+    steps:
+      - name: Install checkout prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Build the shipped solver and pool miner for every architecture
+        run: |
+          set -euo pipefail
+          for arch in $ARCHES; do
+            ./build_solver.sh "$arch"
+            ./build_pool_miner.sh "$arch"
+          done
+
+      # Cheap gate: the consensus wrapper is CPU-only, so a broken key
+      # derivation, packing, or difficulty change stops the release here rather
+      # than reaching a miner.
+      - name: Run the consensus self-test
+        run: |
+          g++ -O2 -std=c++17 -I. tari_c29.cpp tari_c29_selftest.cpp -o tari_c29_selftest
+          ./tari_c29_selftest
+
+      - name: Check every packaged binary is present
+        run: |
+          set -euo pipefail
+          for arch in $ARCHES; do
+            for program in tari_c29_pool_miner tari_c29_solver; do
+              test -f "bin/${program}_${arch}" || {
+                echo "::error::Missing bin/${program}_${arch}"
+                exit 1
+              }
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            bin/tari_c29_pool_miner_sm_*
+            bin/tari_c29_solver_sm_*
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Build Windows backends
+    needs: resolve
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      # Pinned to a commit: this workflow writes to releases, so a moving tag on
+      # a third-party action would be a way into the published binaries.
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+          # The sources include no CUDA headers of their own, so nvcc, the
+          # runtime, and the MSVC integration are all the build needs. If a
+          # future CUDA release renames one, this step fails loudly rather
+          # than the compile failing later for an unclear reason.
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
+      - name: Build the shipped solver and pool miner for every architecture
+        shell: powershell
+        env:
+          # nvcc refuses MSVC versions newer than it knows about. The runner's
+          # Visual Studio moves faster than the CUDA release, so allow it
+          # rather than pinning the workflow to an old runner image.
+          NVCC_PREPEND_FLAGS: -allow-unsupported-compiler
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $install = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $install) {
+            throw 'Visual Studio C++ tools were not found.'
+          }
+          $steps = @("call `"$install\VC\Auxiliary\Build\vcvars64.bat`" >nul")
+          foreach ($arch in $env:ARCHES.Split(' ')) {
+            $steps += "call build_solver.bat $arch"
+            $steps += "call build_pool_miner.bat $arch"
+          }
+          & cmd.exe /d /s /c ($steps -join ' && ')
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Check every packaged binary is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in $ARCHES; do
+            for program in tari_c29_pool_miner tari_c29_solver; do
+              test -f "bin/${program}_${arch}.exe" || {
+                echo "::error::Missing bin/${program}_${arch}.exe"
+                exit 1
+              }
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: bin/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: Package and publish
+    needs: [resolve, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      # Only this job writes; the build jobs stay read-only.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+          path: linux-bin
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: windows-bin
+
+      # Layout, file list, and permissions mirror package_release.ps1, which
+      # needs Windows and WSL and so cannot run here.
+      - name: Stage the three packages
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          windows="dist/staging/TARI.Miner-v$VERSION-windows"
+          linux="dist/staging/TARI.Miner-v$VERSION-linux"
+          hive="dist/staging/tari-miner-hiveos"
+          mkdir -p "$windows/bin" "$linux/bin" "$hive/bin"
+
+          install -m 644 packaging/README.txt "$windows/README.txt"
+          install -m 644 start-c29.bat start-c29.ps1 LICENSE THIRD_PARTY_NOTICES.md "$windows/"
+          install -m 644 windows-bin/*.exe "$windows/bin/"
+
+          install -m 644 packaging/README-LINUX.txt "$linux/README.txt"
+          install -m 644 LICENSE THIRD_PARTY_NOTICES.md "$linux/"
+          install -m 755 start-c29.sh "$linux/"
+          install -m 755 linux-bin/* "$linux/bin/"
+
+          install -m 644 packaging/README-HIVEOS.txt "$hive/README.txt"
+          install -m 644 LICENSE THIRD_PARTY_NOTICES.md hiveos/h-manifest.conf "$hive/"
+          install -m 755 start-c29.sh hiveos/h-config.sh hiveos/h-run.sh hiveos/h-stats.sh "$hive/"
+          install -m 755 linux-bin/* "$hive/bin/"
+
+          for staged in "$windows" "$linux" "$hive"; do
+            count="$(find "$staged/bin" -type f | wc -l)"
+            if [ "$count" -ne 6 ]; then
+              echo "::error::$staged/bin holds $count binaries, expected 6"
+              exit 1
+            fi
+          done
+
+      # Archives are built deterministically - sorted entries, fixed ownership,
+      # the tag's own commit date as the timestamp, and no gzip header time - so
+      # that two runs over identical binaries produce identical archives. The
+      # binaries themselves are whatever nvcc emitted; this makes the packaging
+      # verifiable, not the compilation.
+      - name: Build the archives
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          epoch="$(git log -1 --format=%ct)"
+          release="$PWD/dist/release"
+          cd dist/staging
+
+          ( cd "TARI.Miner-v$VERSION-windows" && \
+            zip -rqX "$release/TARI.Miner-v$VERSION-windows.zip" \
+              README.txt start-c29.bat start-c29.ps1 LICENSE THIRD_PARTY_NOTICES.md bin )
+
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \
+              -cf - -C "TARI.Miner-v$VERSION-linux" . \
+            | gzip -n > "$release/TARI.Miner-v$VERSION-linux.tar.gz"
+
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \
+              -cf - tari-miner-hiveos \
+            | gzip -n > "$release/tari-miner-hiveos-$VERSION.tar.gz"
+
+      - name: Write the checksums
+        working-directory: dist/release
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha256sum \
+            "TARI.Miner-v$VERSION-windows.zip" \
+            "TARI.Miner-v$VERSION-linux.tar.gz" \
+            "tari-miner-hiveos-$VERSION.tar.gz" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          {
+            echo '## Release packages'
+            echo
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/release/*
+          if-no-files-found: error
+
+      - name: Attach the packages to the release
+        if: needs.resolve.outputs.upload == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "dist/release/TARI.Miner-v$VERSION-windows.zip" \
+            "dist/release/TARI.Miner-v$VERSION-linux.tar.gz" \
+            "dist/release/tari-miner-hiveos-$VERSION.tar.gz" \
+            "dist/release/SHA256SUMS.txt" \
+            --clobber
