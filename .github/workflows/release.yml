@@ -33,9 +33,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # sm_120 needs 12.8 or newer. Keep both runners on one version so the two
-  # halves of a release are built by the same compiler.
-  CUDA_VERSION: 12.8.0
+  # sm_120 needs 12.8 or newer. The two platforms differ on purpose, matching
+  # what the repository already targets: Linux builds against the same 12.8
+  # container as ci.yml, while Windows needs 13.2, both because the build script
+  # looks for it and because 12.8's frontend crashes on the runner image's MSVC
+  # headers (cudafe++ ACCESS_VIOLATION).
+  LINUX_CUDA: 12.8.0
+  WINDOWS_CUDA: 13.2.0
   ARCHES: sm_86 sm_89 sm_120
 
 jobs:
@@ -79,7 +83,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "upload=$upload" >> "$GITHUB_OUTPUT"
-          echo "cuda=$CUDA_VERSION" >> "$GITHUB_OUTPUT"
+          echo "cuda=$LINUX_CUDA" >> "$GITHUB_OUTPUT"
           echo "Building $tag (version $version); upload to release: $upload" >> "$GITHUB_STEP_SUMMARY"
 
   linux:
@@ -88,6 +92,11 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:${{ needs.resolve.outputs.cuda }}-devel-ubuntu22.04
+    defaults:
+      run:
+        # Inside a container the default shell is dash, which has no
+        # `set -o pipefail`. Every run step here expects bash.
+        shell: bash
     steps:
       - name: Install checkout prerequisites
         run: |
@@ -151,7 +160,7 @@ jobs:
       - name: Install CUDA
         uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
         with:
-          cuda: ${{ env.CUDA_VERSION }}
+          cuda: ${{ env.WINDOWS_CUDA }}
           method: network
           # The sources include no CUDA headers of their own, so nvcc, the
           # runtime, and the MSVC integration are all the build needs. If a
@@ -161,11 +170,6 @@ jobs:
 
       - name: Build the shipped solver and pool miner for every architecture
         shell: powershell
-        env:
-          # nvcc refuses MSVC versions newer than it knows about. The runner's
-          # Visual Studio moves faster than the CUDA release, so allow it
-          # rather than pinning the workflow to an old runner image.
-          NVCC_PREPEND_FLAGS: -allow-unsupported-compiler
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $install = & $vswhere -latest -products * `
