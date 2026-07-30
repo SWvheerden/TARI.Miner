@@ -161,12 +161,13 @@ jobs:
         uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
         with:
           cuda: ${{ env.WINDOWS_CUDA }}
+          # No sub-package list, which installs the whole toolkit. Naming a
+          # subset is faster but brittle: nvcc, cudart and
+          # visual_studio_integration look sufficient and are not, because 13.2
+          # ships crt/host_config.h - included by cuda_runtime.h - outside them.
+          # A release build is rare enough that the extra install time is worth
+          # not having to track NVIDIA's component layout per version.
           method: network
-          # The sources include no CUDA headers of their own, so nvcc, the
-          # runtime, and the MSVC integration are all the build needs. If a
-          # future CUDA release renames one, this step fails loudly rather
-          # than the compile failing later for an unclear reason.
-          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
 
       - name: Build the shipped solver and pool miner for every architecture
         shell: powershell
