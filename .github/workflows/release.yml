@@ -5,13 +5,14 @@ name: Release
 # asset comes from a tagged commit through a logged, public build, rather than
 # from a developer's machine.
 #
-# Triggered automatically when a release is published. It can also be run by
-# hand against an existing tag, in which case it defaults to producing workflow
-# artifacts only, so a manual run cannot overwrite published assets by accident.
+# Runs when a v* tag is pushed, and on manual dispatch against an existing tag.
+# A manual run produces workflow artifacts only unless it is asked to upload, so
+# rebuilding a tag to inspect it cannot overwrite published assets by accident.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -28,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -49,13 +50,18 @@ jobs:
       # the workflow `env`, and both runners must use the same toolkit.
       cuda: ${{ steps.resolve.outputs.cuda }}
     steps:
+      # On a tag push this is the pushed tag; on dispatch it is the tag asked
+      # for, which is a required input.
       - id: tag
         run: |
-          tag='${{ github.event.release.tag_name || inputs.tag }}'
-          if [ -z "$tag" ]; then
-            echo "::error::No tag to build."
-            exit 1
-          fi
+          tag='${{ inputs.tag || github.ref_name }}'
+          case "$tag" in
+            v*) ;;
+            *)
+              echo "::error::Refusing to build '$tag': release tags start with v."
+              exit 1
+              ;;
+          esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
@@ -82,7 +88,7 @@ jobs:
             echo "::error::hiveos/h-manifest.conf is $manifest but version.h is $version."
             exit 1
           fi
-          upload='${{ github.event_name == 'release' || inputs.upload }}'
+          upload='${{ github.event_name == 'push' || inputs.upload }}'
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "upload=$upload" >> "$GITHUB_OUTPUT"
           echo "cuda=$CUDA_VERSION" >> "$GITHUB_OUTPUT"
@@ -326,6 +332,19 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
+          # A tag push usually arrives before the release exists. Create it as a
+          # draft rather than publishing: the packages are then attached and
+          # reviewable, and announcing them stays a deliberate act.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Uploading to the existing $TAG release."
+          else
+            echo "No $TAG release yet; creating a draft."
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "TARI.Miner C29 $VERSION" \
+              --generate-notes
+          fi
           gh release upload "$TAG" \
             "dist/release/TARI.Miner-v$VERSION-windows.zip" \
             "dist/release/TARI.Miner-v$VERSION-linux.tar.gz" \
