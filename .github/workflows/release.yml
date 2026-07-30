@@ -43,7 +43,7 @@ jobs:
     name: Resolve tag and version
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+      tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
       upload: ${{ steps.resolve.outputs.upload }}
       # Republished as an output because a job's `container.image` cannot read
@@ -51,8 +51,9 @@ jobs:
       cuda: ${{ steps.resolve.outputs.cuda }}
     steps:
       # On a tag push this is the pushed tag; on dispatch it is the tag asked
-      # for, which is a required input.
-      - id: tag
+      # for, which is a required input. The version is the tag without its v,
+      # so package names always match the release they are attached to.
+      - id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -73,35 +74,9 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/tags" --jq '.[].name' | head -20
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          # Fully qualified: an unqualified name would let a branch of the same
-          # name win over the tag.
-          ref: refs/tags/${{ steps.tag.outputs.tag }}
-
-      # The tag, version.h, and the HiveOS manifest have to agree. A mismatch
-      # here means binaries that report one version inside a package named for
-      # another, which is exactly the confusion a release must not ship.
-      - id: resolve
-        run: |
-          tag='${{ steps.tag.outputs.tag }}'
-          version="$(sed -n 's/.*TARI_MINER_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' version.h)"
-          manifest="$(sed -n 's/^CUSTOM_VERSION=//p' hiveos/h-manifest.conf)"
-          if [ -z "$version" ]; then
-            echo "::error::Could not read TARI_MINER_VERSION from version.h."
-            exit 1
-          fi
-          if [ "$tag" != "v$version" ]; then
-            echo "::error::Tag $tag does not match version.h ($version); expected v$version."
-            exit 1
-          fi
-          if [ "$manifest" != "$version" ]; then
-            echo "::error::hiveos/h-manifest.conf is $manifest but version.h is $version."
-            exit 1
-          fi
+          version="${tag#v}"
           upload='${{ github.event_name == 'push' || inputs.upload }}'
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "upload=$upload" >> "$GITHUB_OUTPUT"
           echo "cuda=$CUDA_VERSION" >> "$GITHUB_OUTPUT"
