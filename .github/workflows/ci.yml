@@ -76,12 +76,17 @@ jobs:
             build_all.sh \
             build_pool_miner.sh \
             build_solver.sh \
+            build_flags/read_arch_flags.sh \
+            tests/build_flags_test.sh \
             hiveos/h-config.sh \
             hiveos/h-run.sh \
             hiveos/h-stats.sh
 
       - name: Run shell launcher regressions
         run: bash tests/start_c29_launcher_test.sh
+
+      - name: Run build flag reader regressions
+        run: bash tests/build_flags_test.sh
 
   windows:
     name: Windows CPU and launcher checks
@@ -139,6 +144,10 @@ jobs:
       - name: Run PowerShell launcher regressions
         shell: powershell
         run: .\tests\start_c29_launcher_test.ps1
+
+      - name: Run batch build flag reader regressions
+        shell: powershell
+        run: .\tests\build_flags_test.ps1
 
       - name: Run GPU recall verifier fixtures
         shell: powershell

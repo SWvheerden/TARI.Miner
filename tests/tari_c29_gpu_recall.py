@@ -16,16 +16,28 @@ Use ``--help`` for validation, comparison, and live GPU invocation examples.
 from __future__ import print_function
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Dict,
+    FrozenSet,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 
 PROOF_SIZE = 42
@@ -36,6 +48,10 @@ MAX_U64 = (1 << 64) - 1
 MAX_U256 = (1 << 256) - 1
 DEFAULT_MINING_HASH = "".join("{:02x}".format(i) for i in range(32))
 SUPPORTED_ARCHES = ("sm_86", "sm_89", "sm_120")
+REFERENCE_NTRIMS = 50
+BUILD_FLAGS_DIR = Path(__file__).resolve().parent.parent / "build_flags"
+ARCH_FLAGS_ENV = "TARI_ARCH_FLAGS"
+NTRIMS_FLAG = re.compile(r"-DTARI_C29_DEFAULT_NTRIMS=(\d+)")
 
 FATAL_PATTERNS = (
     ("fatal", re.compile(r"\bfatal(?:\s*:|\b)", re.IGNORECASE)),
@@ -70,8 +86,53 @@ class RecallDataset:
     proofs: FrozenSet[ProofIdentity]
 
 
-def release_compiled_ntrims(arch: str) -> int:
-    return 48 if arch == "sm_120" else 50
+def parse_arch_flags(text: str) -> List[str]:
+    """Split a ``build_flags/<arch>.flags`` body the way the build scripts do.
+
+    Text from ``#`` to end of line is a comment; every remaining
+    whitespace-separated word (CR included as whitespace) is one flag.
+    """
+    flags: List[str] = []
+    for line in text.splitlines():
+        flags.extend(line.split("#", 1)[0].split())
+    return flags
+
+
+def ntrims_from_flags(flags: Iterable[str]) -> int:
+    """Return the TARI_C29_DEFAULT_NTRIMS a flag list compiles in (last wins)."""
+    ntrims = REFERENCE_NTRIMS
+    for flag in flags:
+        match = NTRIMS_FLAG.fullmatch(flag)
+        if match:
+            ntrims = int(match.group(1))
+    return ntrims
+
+
+def release_compiled_ntrims(
+    arch: str,
+    flags_dir: Optional[Path] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> int:
+    """Trim rounds a release build for ``arch`` compiles in by default.
+
+    Mirrors the build scripts: a non-empty ``TARI_ARCH_FLAGS`` replaces
+    ``build_flags/<arch>.flags`` (so set it to the same value the binary was
+    built with), otherwise the file is read. A missing file, or no
+    ``-DTARI_C29_DEFAULT_NTRIMS=`` flag, means the kernel default of 50.
+    """
+    env = os.environ if environ is None else environ
+    override = env.get(ARCH_FLAGS_ENV, "")
+    if override:
+        # Like the build scripts: the override is split on whitespace only.
+        return ntrims_from_flags(override.split())
+    path = (BUILD_FLAGS_DIR if flags_dir is None else Path(flags_dir)) / (
+        arch + ".flags"
+    )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return REFERENCE_NTRIMS
+    return ntrims_from_flags(parse_arch_flags(text))
 
 
 def _require_int(
@@ -770,6 +831,16 @@ def _write_fixture(
     )
 
 
+@contextlib.contextmanager
+def _env_unset(name: str) -> Iterator[None]:
+    saved = os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ[name] = saved
+
+
 def self_test() -> int:
     expected_packed_hex = (
         "0000002000000008000080010000400000000a00008001000038000000080000"
@@ -817,11 +888,79 @@ def self_test() -> int:
         difficulty_from_digest(bytes(32)) == MAX_U64,
         "zero digest caps to uint64 maximum",
     )
-    check(release_compiled_ntrims("sm_120") == 48, "sm_120 release ntrims")
-    check(release_compiled_ntrims("sm_89") == 50, "sm_89 release ntrims")
-    check(release_compiled_ntrims("sm_86") == 50, "sm_86 release ntrims")
+    no_env: Dict[str, str] = {}
+    check(
+        release_compiled_ntrims("sm_120", environ=no_env) == 48,
+        "sm_120 release ntrims from build_flags",
+    )
+    check(
+        release_compiled_ntrims("sm_89", environ=no_env) == 50,
+        "sm_89 release ntrims",
+    )
+    check(
+        release_compiled_ntrims("sm_86", environ=no_env) == 50,
+        "sm_86 release ntrims",
+    )
+    check(
+        release_compiled_ntrims("sm_75", environ=no_env) == 50,
+        "arch without a flags file uses the default",
+    )
+    check(
+        release_compiled_ntrims(
+            "sm_120", environ={ARCH_FLAGS_ENV: "-DX=1 -DTARI_C29_DEFAULT_NTRIMS=44"}
+        )
+        == 44,
+        "TARI_ARCH_FLAGS replaces the flags file",
+    )
+    check(
+        release_compiled_ntrims(
+            "sm_120",
+            environ={ARCH_FLAGS_ENV: "-DTARI_C29_DEFAULT_NTRIMS=44\t#x\r"},
+        )
+        == 44,
+        "TARI_ARCH_FLAGS is split on whitespace only",
+    )
+    check(
+        release_compiled_ntrims("sm_120", environ={ARCH_FLAGS_ENV: " "}) == 50,
+        "blank TARI_ARCH_FLAGS means no extra flags",
+    )
+    check(
+        release_compiled_ntrims("sm_120", environ={ARCH_FLAGS_ENV: ""}) == 48,
+        "empty TARI_ARCH_FLAGS is ignored",
+    )
 
-    with tempfile.TemporaryDirectory(prefix="tari-recall-selftest-") as temp:
+    with tempfile.TemporaryDirectory(prefix="tari-recall-selftest-flags-") as temp:
+        flags_dir = Path(temp)
+        (flags_dir / "sm_empty.flags").write_text("", encoding="utf-8")
+        (flags_dir / "sm_comments.flags").write_bytes(
+            b"# header\r\n"
+            b"\r\n"
+            b"#-DTARI_C29_DEFAULT_NTRIMS=40\r\n"
+            b"  # -DTARI_C29_DEFAULT_NTRIMS=42\r\n"
+            b"-DROUND23_TPB=960 # -DTARI_C29_DEFAULT_NTRIMS=46\r\n"
+        )
+        (flags_dir / "sm_set.flags").write_bytes(
+            b"-DA=1\r\n\t-DTARI_C29_DEFAULT_NTRIMS=52 \t\r\n-DB=2"
+        )
+
+        def from_dir(arch: str) -> int:
+            return release_compiled_ntrims(arch, flags_dir, no_env)
+
+        check(from_dir("sm_empty") == 50, "empty flags file uses the default")
+        check(from_dir("sm_missing") == 50, "missing flags file uses the default")
+        check(from_dir("sm_comments") == 50, "commented-out ntrims is ignored")
+        check(from_dir("sm_set") == 52, "CRLF flags file with blanks is parsed")
+        check(
+            parse_arch_flags("-DA=1\r\n\t-DB=2 # c\r\n#-DC=3\n\n")
+            == ["-DA=1", "-DB=2"],
+            "flag file parsing",
+        )
+
+    # The fixtures below assume the committed sm_120 flags; a sweep override
+    # in the caller's environment must not change them.
+    with _env_unset(ARCH_FLAGS_ENV), tempfile.TemporaryDirectory(
+        prefix="tari-recall-selftest-"
+    ) as temp:
         root = Path(temp)
         valid = root / "valid.jsonl"
         valid_log = root / "valid.log"
