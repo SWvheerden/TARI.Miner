@@ -123,7 +123,8 @@ def release_compiled_ntrims(
     env = os.environ if environ is None else environ
     override = env.get(ARCH_FLAGS_ENV, "")
     if override:
-        return ntrims_from_flags(parse_arch_flags(override))
+        # Like the build scripts: the override is split on whitespace only.
+        return ntrims_from_flags(override.split())
     path = (BUILD_FLAGS_DIR if flags_dir is None else Path(flags_dir)) / (
         arch + ".flags"
     )
@@ -910,6 +911,14 @@ def self_test() -> int:
         )
         == 44,
         "TARI_ARCH_FLAGS replaces the flags file",
+    )
+    check(
+        release_compiled_ntrims(
+            "sm_120",
+            environ={ARCH_FLAGS_ENV: "-DTARI_C29_DEFAULT_NTRIMS=44\t#x\r"},
+        )
+        == 44,
+        "TARI_ARCH_FLAGS is split on whitespace only",
     )
     check(
         release_compiled_ntrims("sm_120", environ={ARCH_FLAGS_ENV: " "}) == 50,

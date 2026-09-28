@@ -79,7 +79,7 @@ try {
         "call `"%T_HELPER%`"`r`n" +
         "echo FLAGS[%EXTRA_FLAGS%]`r`n"
     ))
-    $body = "# header|  -DQ=1   # inline|#-DZ=2|`t-DR=3 `t|  # -DY=4|-DS=5"
+    $body = "# header||  -DQ=1   # inline|#-DZ=2|   `t|`t-DR=3 `t|  # -DY=4|-DS=5"
     [IO.File]::WriteAllText(
         (Join-Path $fixtures 'build_flags\sm_crlf.flags'),
         $body.Replace('|', "`r`n")

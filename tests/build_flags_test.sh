@@ -26,9 +26,9 @@ expect() {
 }
 
 mkdir -p "$TEMP_ROOT/build_flags"
-printf '# header\r\n\r\n  -DQ=1   # inline\r\n#-DZ=2\r\n\t-DR=3 \t\r\n  # -DY=4\r\n-DS=5' \
+printf '# header\r\n\r\n  -DQ=1   # inline\r\n#-DZ=2\r\n   \t\r\n\t-DR=3 \t\r\n  # -DY=4\r\n-DS=5' \
     > "$TEMP_ROOT/build_flags/sm_crlf.flags"
-printf '# header\n\n  -DQ=1   # inline\n#-DZ=2\n\t-DR=3 \t\n  # -DY=4\n-DS=5\n' \
+printf '# header\n\n  -DQ=1   # inline\n#-DZ=2\n   \t\n\t-DR=3 \t\n  # -DY=4\n-DS=5\n' \
     > "$TEMP_ROOT/build_flags/sm_lf.flags"
 : > "$TEMP_ROOT/build_flags/sm_empty.flags"
 
