@@ -287,6 +287,32 @@ test. Individual backends can be built with `build_solver` or
 `build_pool_miner` and one of `sm_86`, `sm_89`, or `sm_120`; pass `reference`
 as the second `build_solver` argument to build only that validation profile.
 
+Release builds add the tuning flags listed in `build_flags/<arch>.flags` (one
+nvcc flag per line; `#` starts a comment, blank lines are ignored). The same
+file is used by the `.sh` and `.bat` scripts, and each build prints the
+effective list. `sm_120` carries the tuned set, including 48 trim rounds;
+`sm_86` and `sm_89` are empty until they are tuned on real hardware. An
+architecture with no file builds with no extra flags. The reference profile
+ignores these files and pins every option to reference behaviour.
+
+To try a different set without editing files, for example during a tuning
+sweep, set `TARI_ARCH_FLAGS`. A non-empty value replaces the file for that
+build; a value of only a space builds with no extra flags:
+
+```bash
+TARI_ARCH_FLAGS="-DTARI_C29_DEFAULT_NTRIMS=48 -DROUND23_TPB=960" ./build_solver.sh sm_89
+```
+
+```bat
+set "TARI_ARCH_FLAGS=-DTARI_C29_DEFAULT_NTRIMS=48 -DROUND23_TPB=960"
+build_solver.bat sm_89
+```
+
+`tests/tari_c29_gpu_recall.py` takes the expected release trim count from
+`-DTARI_C29_DEFAULT_NTRIMS=` in the same file (50 if absent). It honours
+`TARI_ARCH_FLAGS` too, so keep it set to the value the candidate solver was
+built with when running the recall test.
+
 ## License
 
 TARI.Miner is GPL-3.0-or-later. Required upstream licenses and attribution are

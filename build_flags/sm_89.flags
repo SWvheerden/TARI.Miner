@@ -1,0 +1,7 @@
+# Release-profile nvcc flags for sm_89 (RTX 40 / Ada).
+# One flag per line. Text from '#' to end of line is a comment; blank lines are
+# ignored. Read by build_solver.{sh,bat} (release profile) and
+# build_pool_miner.{sh,bat}. TARI_ARCH_FLAGS, when non-empty, replaces this list.
+#
+# Intentionally empty: this arch builds with the kernel defaults (including 50
+# trim rounds) until a tuning sweep on real sm_89 hardware picks a flag set.

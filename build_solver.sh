@@ -25,14 +25,17 @@ HOST_FLAGS=()
 if [[ -n "$NVCC_HOST" ]]; then
     HOST_FLAGS=(-ccbin "$NVCC_HOST" --allow-unsupported-compiler)
 fi
+# shellcheck source=build_flags/read_arch_flags.sh
+source "$ROOT/build_flags/read_arch_flags.sh"
 PROFILE_FLAGS=()
 EXTRA_FLAGS=()
 case "$PROFILE" in
     release)
         OUTPUT="$ROOT/bin/tari_c29_solver_$ARCH"
         PROFILE_FLAGS=(-DGRAPH_UNION_SKIP=1 -DRECOVERY_SMALL_OUTPUT=1 -DSEEDA_REHASH=1)
-        if [[ "$ARCH" == "sm_120" ]]; then
-            EXTRA_FLAGS=(-DWARP_DST_ATOMICS_LATE=1 -DTARI_C29_DEFAULT_NTRIMS=48 -DSEEDB_REVERSE_LOOP=1 -DROUND0_DST_HASH_DYNAMIC_BITS=12 -DROUND0_DST_HASH_DYNAMIC_PROBES=4 -DROUND0_DST_HASH_FALLBACK_PLAIN=1 -DROUND0_DST_HASH_REPLAY_NORMAL_LOAD=1 -DROUND0_DST_HASH_REVERSE_INSERT=1 -DFUSE_FINAL_TAIL_CURRENT=1 -DFUSE_FINAL_TAIL_COUNT_NORMAL_LOAD=1 -DROUND23_TPB=960 -DROUND1_COUNT_NORMAL_LOAD=1 -DROUND23_COUNT_NORMAL_LOAD=1)
+        read_arch_flags "$ROOT" "$ARCH"
+        if [[ ${#ARCH_FLAGS[@]} -gt 0 ]]; then
+            EXTRA_FLAGS=("${ARCH_FLAGS[@]}")
         fi
         ;;
     reference)
@@ -47,6 +50,9 @@ case "$PROFILE" in
 esac
 
 echo "Building tari_c29_solver_linux for $ARCH profile=$PROFILE ..."
+if [[ "$PROFILE" == "release" ]]; then
+    print_arch_flags "$ARCH"
+fi
 "$NVCC" "${HOST_FLAGS[@]}" -O3 -std="$STD" --default-stream per-thread -DXBITS="$XBITS" -DIDXSHIFT="$IDXSHIFT" -DTARI_C29_BUILD_ARCH="$BUILD_ARCH" \
     "${PROFILE_FLAGS[@]}" \
     "${EXTRA_FLAGS[@]}" \

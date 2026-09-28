@@ -18,8 +18,7 @@ exit /b 2
 :release_profile
 set "OUTPUT=%ROOT%bin\tari_c29_solver_%ARCH%.exe"
 set "PROFILE_FLAGS=-DGRAPH_UNION_SKIP=1 -DRECOVERY_SMALL_OUTPUT=1 -DSEEDA_REHASH=1"
-set EXTRA_FLAGS=
-if /I "%ARCH%"=="sm_120" set EXTRA_FLAGS=-DWARP_DST_ATOMICS_LATE=1 -DTARI_C29_DEFAULT_NTRIMS=48 -DSEEDB_REVERSE_LOOP=1 -DROUND0_DST_HASH_DYNAMIC_BITS=12 -DROUND0_DST_HASH_DYNAMIC_PROBES=4 -DROUND0_DST_HASH_FALLBACK_PLAIN=1 -DROUND0_DST_HASH_REPLAY_NORMAL_LOAD=1 -DROUND0_DST_HASH_REVERSE_INSERT=1 -DFUSE_FINAL_TAIL_CURRENT=1 -DFUSE_FINAL_TAIL_COUNT_NORMAL_LOAD=1 -DROUND23_TPB=960 -DROUND1_COUNT_NORMAL_LOAD=1 -DROUND23_COUNT_NORMAL_LOAD=1
+call "%ROOT%build_flags\read_arch_flags.bat"
 goto profile_ready
 
 :reference_profile
@@ -36,6 +35,7 @@ set "CUCKAROO=%ROOT%third_party\cuckoo\src\cuckaroo"
 set "CRYPTO=%ROOT%third_party\cuckoo\src\crypto"
 
 echo Building tari_c29_solver for %ARCH% profile=%PROFILE% ...
+if /I "%PROFILE%"=="release" call "%ROOT%build_flags\read_arch_flags.bat" print
 "%NVCC%" -O3 -std=c++17 -arch=%ARCH% --default-stream per-thread -DXBITS=7 -DIDXSHIFT=9 -DTARI_C29_BUILD_ARCH=%BUILD_ARCH% %PROFILE_FLAGS% %EXTRA_FLAGS% -maxrregcount=96 -Xptxas -flcm=cg ^
     -I"%ROOT%compat" ^
     -I"%CUCKAROO%" ^
