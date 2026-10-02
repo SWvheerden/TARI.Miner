@@ -75,7 +75,7 @@ static void test_on_start_runs_once_on_worker() {
     expect("worker is not the caller", job_id != std::this_thread::get_id());
 }
 
-static void test_second_queued_submit_is_rejected() {
+static void test_submit_while_running_is_rejected() {
     tari_miner::WorkerThread worker;
     std::promise<void> release;
     std::shared_future<void> gate = release.get_future().share();
@@ -88,16 +88,29 @@ static void test_second_queued_submit_is_rejected() {
         return 1;
     });
     started_f.get();
-    // The first job is running, so this one fills the single queue slot.
-    std::future<int> queued = worker.submit([]() { return 2; });
-    // The slot is now full: a third submit is a logic error.
-    std::future<int> rejected = worker.submit([]() { return 3; });
+    // The first job is still running, so it is outstanding.
+    std::future<int> rejected = worker.submit([]() { return 2; });
     expect("running job future valid", running.valid());
-    expect("queued job future valid", queued.valid());
-    expect("over-full submit returns invalid future", !rejected.valid());
+    expect("submit while running returns invalid future", !rejected.valid());
     release.set_value();
     expect("running job completes", running.get() == 1);
-    expect("queued job completes", queued.get() == 2);
+    std::future<int> next = worker.submit([]() { return 3; });
+    expect("submit after the job finished is accepted", next.valid());
+    expect("next job completes", next.get() == 3);
+}
+
+static void test_submit_while_queued_is_rejected() {
+    // A job that has not started yet is outstanding too. Hold the worker in
+    // on_start so the first job stays queued.
+    std::promise<void> release;
+    std::shared_future<void> gate = release.get_future().share();
+    tari_miner::WorkerThread worker([gate]() { gate.wait(); });
+    std::future<int> queued = worker.submit([]() { return 1; });
+    std::future<int> rejected = worker.submit([]() { return 2; });
+    expect("queued job future valid", queued.valid());
+    expect("submit while queued returns invalid future", !rejected.valid());
+    release.set_value();
+    expect("queued job completes", queued.get() == 1);
 }
 
 static void test_stop_without_pending_job() {
@@ -109,9 +122,8 @@ static void test_stop_without_pending_job() {
     expect("submit after stop returns invalid future", !after.valid());
 }
 
-static void test_stop_with_pending_job() {
+static void test_stop_with_running_job() {
     std::future<int> running;
-    std::future<int> queued;
     std::atomic<bool> running_done{false};
     {
         tari_miner::WorkerThread worker;
@@ -124,12 +136,31 @@ static void test_stop_with_pending_job() {
             return 10;
         });
         started_f.get();
-        queued = worker.submit([]() { return 11; });
-        // The destructor finishes the running job and the queued one, then joins.
+        // The destructor finishes the running job, then joins.
     }
     expect("stop finishes the current job", running_done.load());
     expect("stop result of current job", running.get() == 10);
-    expect("stop runs the queued job", queued.get() == 11);
+}
+
+static void test_exception_clears_outstanding() {
+    tari_miner::WorkerThread worker;
+    for (int i = 0; i < 1000; i++) {
+        std::future<int> f = worker.submit([]() -> int {
+            throw std::runtime_error("job failed");
+        });
+        bool caught = false;
+        try {
+            (void)f.get();
+        } catch (const std::runtime_error &) {
+            caught = true;
+        }
+        if (!caught) {
+            expect("exception reaches future in loop", false);
+            return;
+        }
+    }
+    std::future<int> next = worker.submit([]() { return 5; });
+    expect("submit straight after a thrown job is accepted", next.valid() && next.get() == 5);
 }
 
 static void test_many_submits_use_one_thread() {
@@ -137,12 +168,19 @@ static void test_many_submits_use_one_thread() {
     const std::thread::id first =
         worker.submit([]() { return std::this_thread::get_id(); }).get();
     bool same = true;
+    bool all_valid = true;
     for (int i = 0; i < 10000; i++) {
-        std::thread::id id =
-            worker.submit([]() { return std::this_thread::get_id(); }).get();
-        if (id != first)
+        // get() followed straight away by submit() must never be rejected.
+        std::future<std::thread::id> f =
+            worker.submit([]() { return std::this_thread::get_id(); });
+        if (!f.valid()) {
+            all_valid = false;
+            break;
+        }
+        if (f.get() != first)
             same = false;
     }
+    expect("submit right after get() is always accepted", all_valid);
     expect("thread id is stable across 10k jobs", same);
     expect("jobs do not run on the caller", first != std::this_thread::get_id());
 }
@@ -152,9 +190,11 @@ int main() {
     test_void_job();
     test_exception_passes_through();
     test_on_start_runs_once_on_worker();
-    test_second_queued_submit_is_rejected();
+    test_submit_while_running_is_rejected();
+    test_submit_while_queued_is_rejected();
     test_stop_without_pending_job();
-    test_stop_with_pending_job();
+    test_stop_with_running_job();
+    test_exception_clears_outstanding();
     test_many_submits_use_one_thread();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

@@ -18,13 +18,15 @@ namespace tari_miner {
 // per-thread state (current device, per-thread default stream, last error)
 // stays the same from one graph to the next.
 //
-// The queue holds one job that has not started yet. A job may be submitted
-// while the previous one is still running, but submitting while another job
-// is still waiting to start is a logic error: submit() then returns an
-// invalid future (valid() == false) and the job is not run.
+// At most one job is outstanding, from submit() until the job has finished.
+// Submitting while a job is outstanding (queued or running) is a logic error:
+// submit() then returns an invalid future (valid() == false) and the job is
+// not run. The job stops being outstanding before its future becomes ready,
+// so get() followed straight away by submit() is always accepted. Results
+// and exceptions thrown by the job reach the future.
 //
-// stop() and the destructor run every job already accepted, then join, so a
-// future returned by submit() is always eventually satisfied.
+// stop() and the destructor finish the outstanding job, if any, then join,
+// so a future returned by submit() is always eventually satisfied.
 class WorkerThread {
 public:
     WorkerThread() : WorkerThread(std::function<void()>()) {}
@@ -41,23 +43,41 @@ public:
     template <class F>
     std::future<typename std::invoke_result<F>::type> submit(F &&f) {
         using R = typename std::invoke_result<F>::type;
-        // packaged_task is move-only and std::function needs a copyable
-        // target, so the task is shared with the queued wrapper.
-        auto task = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
+        // std::promise is move-only and std::function needs a copyable
+        // target, so the promise is shared with the queued wrapper.
+        auto promise = std::make_shared<std::promise<R>>();
         // Take the future before the worker can see the job.
-        std::future<R> result = task->get_future();
+        std::future<R> result = promise->get_future();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (stopping_ || job_)
+            if (stopping_ || busy_)
                 return std::future<R>();
-            job_ = [task]() { (*task)(); };
+            busy_ = true;
+            job_ = [this, promise, fn = std::forward<F>(f)]() mutable {
+                // finish() runs before the promise is satisfied, so a caller
+                // woken by the future can submit again at once.
+                try {
+                    if constexpr (std::is_void<R>::value) {
+                        fn();
+                        finish();
+                        promise->set_value();
+                    } else {
+                        R value = fn();
+                        finish();
+                        promise->set_value(std::move(value));
+                    }
+                } catch (...) {
+                    finish();
+                    promise->set_exception(std::current_exception());
+                }
+            };
         }
         cv_.notify_one();
         return result;
     }
 
-    // Runs any job already accepted, then joins. Safe to call more than once.
-    // Must not be called from a job running on this worker.
+    // Finishes the outstanding job, if any, then joins. Safe to call more
+    // than once. Must not be called from a job running on this worker.
     void stop() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -82,14 +102,19 @@ private:
                 job = std::move(job_);
                 job_ = nullptr;
             }
-            // packaged_task stores any exception in the future.
             job();
         }
     }
 
+    void finish() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        busy_ = false;
+    }
+
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::function<void()> job_;
+    std::function<void()> job_;  // accepted job that has not started yet
+    bool busy_ = false;          // a job is outstanding: queued or running
     bool stopping_ = false;
     // Declared last so the members above exist before the thread starts.
     std::thread thread_;
