@@ -17,10 +17,12 @@
 #include <chrono>
 #include <algorithm>
 #include <future>
+#include <memory>
 
 #include "tari_miner_pipeline.h"
 #include "tari_miner_reliability.h"
 #include "tari_pool_protocol.h"
+#include "tari_miner_worker.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -787,6 +789,15 @@ int main(int argc, char **argv) {
     }
     opt.pipeline = (int)contexts.size();
     printf("solver pipeline=%d context%s\n", opt.pipeline, opt.pipeline == 1 ? "" : "s");
+    // One long-lived trim thread per context in pipeline mode, kept across
+    // pool reconnects. It selects the device once; trim_copy_checked() still
+    // sets it per call as before.
+    std::vector<std::unique_ptr<tari_miner::WorkerThread>> workers;
+    if (opt.pipeline > 1) {
+        for (size_t i = 0; i < contexts.size(); i++)
+            workers.push_back(std::make_unique<tari_miner::WorkerThread>(
+                [device = opt.device]() { cudaSetDevice(device); }));
+    }
 
     uint64_t graphs = 0, cycles = 0, submitted = 0, verify_failures = 0;
     int exit_code = 0;
@@ -1052,7 +1063,7 @@ int main(int argc, char **argv) {
                 pending[(size_t)slot].job = launch_job;
                 pending[(size_t)slot].nonce = nonce;
                 pending[(size_t)slot].active = true;
-                pending[(size_t)slot].future = std::async(std::launch::async, [slot_ctx, device = opt.device]() {
+                pending[(size_t)slot].future = workers[(size_t)slot]->submit([slot_ctx, device = opt.device]() {
                     return slot_ctx->trim_copy_checked(device);
                 });
                 return true;
@@ -1147,6 +1158,9 @@ int main(int argc, char **argv) {
            (unsigned long long)graphs, elapsed, graphs / elapsed,
            (unsigned long long)cycles, (unsigned long long)submitted,
            (unsigned long long)verify_failures);
+    // Every pipeline loop drains its pending trims before leaving, so the
+    // workers are idle here. Join them before their contexts are destroyed.
+    workers.clear();
     for (SolverCtx *c : contexts)
         destroy_solver_ctx(c);
     socket_cleanup();

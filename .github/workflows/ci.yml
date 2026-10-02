@@ -59,6 +59,13 @@ jobs:
             -o tests/tari_miner_pipeline_test
           tests/tari_miner_pipeline_test
 
+      - name: Build and run worker thread regressions
+        run: |
+          g++ -std=c++17 -O2 -pthread -I. \
+            tests/tari_miner_worker_test.cpp \
+            -o tests/tari_miner_worker_test
+          tests/tari_miner_worker_test
+
       - name: Run GPU recall verifier fixtures
         run: python3 tests/tari_c29_gpu_recall.py --self-test
 
@@ -112,6 +119,8 @@ jobs:
             'tests\tari_miner_reliability_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_miner_pipeline_test.cpp /Fe:tests\tari_miner_pipeline_test.exe',
             'tests\tari_miner_pipeline_test.exe',
+            'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_miner_worker_test.cpp /Fe:tests\tari_miner_worker_test.exe',
+            'tests\tari_miner_worker_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 tari_c29.cpp tari_c29_selftest.cpp /Fe:tari_c29_selftest.exe',
             'tari_c29_selftest.exe'
           ) -join ' && '

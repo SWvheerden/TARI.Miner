@@ -23,9 +23,11 @@
 #include <chrono>
 #include <future>
 #include <fstream>
+#include <memory>
 
 #include "tari_miner_pipeline.h"
 #include "tari_miner_reliability.h"
+#include "tari_miner_worker.h"
 #include "version.h"
 
 // --- MSVC host-compiler shims for the reference solver's GNU-isms ---
@@ -368,6 +370,12 @@ int main(int argc, char **argv) {
         std::vector<tari_miner::SolverWatchdog> watchdogs((size_t)pipeline);
         for (size_t i = 1; i < contexts.size(); i++)
             extra_contexts.push_back(contexts[i]);
+        // One long-lived trim thread per context. It selects the device once;
+        // trim_copy_checked() still sets it per call as before.
+        std::vector<std::unique_ptr<tari_miner::WorkerThread>> workers;
+        for (size_t i = 0; i < contexts.size(); i++)
+            workers.push_back(std::make_unique<tari_miner::WorkerThread>(
+                [device]() { cudaSetDevice(device); }));
         t0 = now_sec();
 
         struct PendingTrim {
@@ -383,7 +391,7 @@ int main(int argc, char **argv) {
             inject_keys(c, nonce);
             pending[(size_t)slot].nonce = nonce;
             pending[(size_t)slot].active = true;
-            pending[(size_t)slot].future = std::async(std::launch::async, [c, device]() {
+            pending[(size_t)slot].future = workers[(size_t)slot]->submit([c, device]() {
                 return c->trim_copy_checked(device);
             });
         };
@@ -423,6 +431,8 @@ int main(int argc, char **argv) {
                 launch_trim(slot);
         }
         drain_pending();
+        // Join the trim threads before their contexts are destroyed below.
+        workers.clear();
     }
 
     double elapsed = now_sec() - t0;
