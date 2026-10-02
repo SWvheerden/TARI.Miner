@@ -313,6 +313,8 @@ Try them through `TARI_ARCH_FLAGS`:
 
 - `-DLATE_ROUND_SELF_ZERO_IDX=1`: rounds 2, 3 and the late rounds clear the
   bucket counts they read, replacing the per-round index memsets.
+- `-DTRIM_CUDA_GRAPH=1`: each solver context gets its own CUDA stream, and
+  Round 0 through the final edge count runs as one CUDA graph.
 
 `tests/tari_c29_gpu_recall.py` takes the expected release trim count from
 `-DTARI_C29_DEFAULT_NTRIMS=` in the same file (50 if absent). It honours
