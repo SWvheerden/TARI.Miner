@@ -315,6 +315,12 @@ Try them through `TARI_ARCH_FLAGS`:
   bucket counts they read, replacing the per-round index memsets.
 - `-DTRIM_CUDA_GRAPH=1`: each solver context gets its own CUDA stream, and
   Round 0 through the final edge count runs as one CUDA graph.
+- `-DLATE_ROUND_BPB=2`, `4` or `8`: each late-round block filters that many
+  buckets with one shared bitmap, cutting the late-round grid by the same
+  factor (default 1 keeps the existing kernel).
+
+`docs/spec2_gpu_validation.md` lists the GPU measurements and recall checks
+that decide whether to enable them.
 
 `tests/tari_c29_gpu_recall.py` takes the expected release trim count from
 `-DTARI_C29_DEFAULT_NTRIMS=` in the same file (50 if absent). It honours

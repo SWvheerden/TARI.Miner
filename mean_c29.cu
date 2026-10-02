@@ -166,6 +166,14 @@ const u32 ROW_EDGES_B = EDGES_B * NY;
 #if TRIM_CUDA_GRAPH && !SQUASH_OUTPUT
 #error "TRIM_CUDA_GRAPH needs SQUASH_OUTPUT: the verbose path syncs the device between rounds"
 #endif
+// Experimental. Source buckets per block in the late rounds; 1 keeps Round,
+// 2, 4 or 8 use RoundMulti with NX2 / LATE_ROUND_BPB blocks.
+#ifndef LATE_ROUND_BPB
+#define LATE_ROUND_BPB 1
+#endif
+#if LATE_ROUND_BPB != 1 && LATE_ROUND_BPB != 2 && LATE_ROUND_BPB != 4 && LATE_ROUND_BPB != 8
+#error "LATE_ROUND_BPB must be 1, 2, 4 or 8"
+#endif
 // Number of Parts of BufferB, all but one of which will overlap BufferA
 #ifndef NB
 #define NB 2
@@ -369,6 +377,9 @@ __global__ void SeedB(const uint2 * __restrict__ source, ulonglong4 * __restrict
 constexpr int DUP_COUNTER_OFFSET = NZ / 32 + ROUND_COUNTER_PAD;
 constexpr int ROUND_COUNTER_WORDS = NZ / 16 + ROUND_COUNTER_PAD;
 
+// DUP_OFFSET is the word offset of the "seen twice" bitmap; RoundMulti uses
+// a larger one for its BPB-bucket bitmap.
+template<int DUP_OFFSET = DUP_COUNTER_OFFSET>
 __device__ __forceinline__  void Increase2bCounter(u32 *ecounters, const int bucket) {
   int word = bucket >> 5;
   unsigned char bit = bucket & 0x1F;
@@ -376,14 +387,15 @@ __device__ __forceinline__  void Increase2bCounter(u32 *ecounters, const int buc
 
   u32 old = atomicOr(ecounters + word, mask) & mask;
   if (old)
-    atomicOr(ecounters + word + DUP_COUNTER_OFFSET, mask);
+    atomicOr(ecounters + word + DUP_OFFSET, mask);
 }
 
+template<int DUP_OFFSET = DUP_COUNTER_OFFSET>
 __device__ __forceinline__  bool Read2bCounter(u32 *ecounters, const int bucket) {
   int word = bucket >> 5;
   unsigned char bit = bucket & 0x1F;
 
-  return (ecounters[word + DUP_COUNTER_OFFSET] >> bit) & 1;
+  return (ecounters[word + DUP_OFFSET] >> bit) & 1;
 }
 
 __device__ __forceinline__ uint2 LoadRoundEdge(const uint2 *src, const int index) {
@@ -674,6 +686,106 @@ __global__ void Round(const uint2 * __restrict__ src, uint2 * __restrict__ dst,
   }
 }
 
+#if LATE_ROUND_BPB > 1
+// Shared memory words for RoundMulti: two bitmaps of BPB * NZ bits.
+__host__ __device__ constexpr int MultiCounterWords(const int bpb) {
+  return bpb * NZ / 16 + ROUND_COUNTER_PAD;
+}
+
+// Late-round copy of Round<1, ...>: each block counts and filters BPB
+// consecutive source buckets with one bitmap of BPB * NZ nodes, so the grid
+// is NX2 / BPB blocks. Bucket j of the block owns counters
+// (j << ZBITS) | (node & ZMASK), an NZ-bit slice of its own, so each bucket
+// keeps exactly the counts Round keeps for it. The output layout is unchanged.
+template<int maxIn, int maxOut, int UORV, int CHECK_NULL, int BPB, int ZERO_SRC_IDX>
+__global__ void RoundMulti(const uint2 * __restrict__ src, uint2 * __restrict__ dst,
+                           typename std::conditional<ZERO_SRC_IDX != 0, u32, const u32>::type * __restrict__ srcIdx,
+                           u32 * __restrict__ dstIdx) {
+  constexpr int COUNTER_WORDS = MultiCounterWords(BPB);
+  constexpr int DUP_OFFSET = BPB * NZ / 32 + ROUND_COUNTER_PAD;
+  const int dim = blockDim.x;
+  const int lid = threadIdx.x;
+
+  extern __shared__ u32 multiCounters[]; // COUNTER_WORDS, dynamic: may exceed 48 KB
+  for (int i = lid; i < COUNTER_WORDS; i += dim)
+    multiCounters[i] = 0;
+  __syncthreads();
+
+  for (int j = 0; j < BPB; j++) {
+    const int group = blockIdx.x * BPB + j;
+    const int edgesInBucket = min(srcIdx[group], maxIn);
+    const int loops = (edgesInBucket + dim-1) / dim;
+
+    for (int loop = 0; loop < loops; loop++) {
+      const int lindex = loop * dim + lid;
+      if (lindex < edgesInBucket) {
+        const int index = maxIn * group + lindex;
+        uint2 edge = LoadRoundEdge(src, index);
+        if constexpr (CHECK_NULL) {
+          if (null(edge)) continue;
+        }
+        u32 node = UORV ? edge.y : edge.x;
+        Increase2bCounter<DUP_OFFSET>(multiCounters, (j << ZBITS) | (node & ZMASK));
+      }
+    }
+  }
+
+  __syncthreads();
+
+  for (int j = 0; j < BPB; j++) {
+    const int group = blockIdx.x * BPB + j;
+    const int edgesInBucket = min(srcIdx[group], maxIn);
+    const int loops = (edgesInBucket + dim-1) / dim;
+    for (int loop = 0; loop < loops; loop++) {
+      const int lindex = loop * dim + lid;
+      if (lindex < edgesInBucket) {
+        const int index = maxIn * group + lindex;
+        uint2 edge = LoadRoundEdge(src, index);
+        if constexpr (CHECK_NULL) {
+          if (null(edge)) continue;
+        }
+        u32 node0 = UORV ? edge.y : edge.x;
+        if (Read2bCounter<DUP_OFFSET>(multiCounters, (j << ZBITS) | (node0 & ZMASK))) {
+          u32 node1 = UORV ? edge.x : edge.y;
+          const int bucket = node1 >> ZBITS;
+          const uint2 outEdge = UORV ? make_uint2(node1, node0) : make_uint2(node0, node1);
+#if WARP_DST_ATOMICS
+          if constexpr (maxIn > EDGES_B/4 || WARP_DST_ATOMICS_LATE) {
+          const unsigned lane = threadIdx.x & 31;
+          const unsigned mask = __match_any_sync(__activemask(), bucket);
+          const unsigned rank = __popc(mask & ((1u << lane) - 1));
+          const unsigned count = __popc(mask);
+          const unsigned leader = __ffs(mask) - 1;
+          u32 base = 0;
+          if (lane == leader)
+            base = atomicAdd(dstIdx + bucket, count);
+          base = __shfl_sync(mask, base, leader);
+          const u32 bktIdx = min(base + rank, (u32)(maxOut - 1));
+          StoreRoundEdge(dst, bucket * maxOut + bktIdx, outEdge);
+          } else {
+          const int bktIdx = min(atomicAdd(dstIdx + bucket, 1), maxOut - 1);
+          StoreRoundEdge(dst, bucket * maxOut + bktIdx, outEdge);
+          }
+#else
+          const int bktIdx = min(atomicAdd(dstIdx + bucket, 1), maxOut - 1);
+          StoreRoundEdge(dst, bucket * maxOut + bktIdx, outEdge);
+#endif
+        }
+      }
+    }
+  }
+
+  if constexpr (ZERO_SRC_IDX != 0) {
+    // Every thread has read the block's counts for the second pass.
+    __syncthreads();
+    for (int j = lid; j < BPB; j += dim)
+      srcIdx[blockIdx.x * BPB + j] = 0;
+  }
+}
+
+constexpr size_t LATE_ROUND_MULTI_SMEM = MultiCounterWords(LATE_ROUND_BPB) * sizeof(u32);
+#endif
+
 template<int maxIn>
 __global__ void Tail(const uint2 *source, uint2 *destination, const u32 *srcIdx, u32 *dstIdx) {
   const int lid = threadIdx.x;
@@ -875,6 +987,15 @@ struct edgetrimmer {
 #if LATE_ROUND_SELF_ZERO_IDX
     assert(tp.trim.blocks == NX2); // one trim block per bucket, so every count gets zeroed
 #endif
+#if LATE_ROUND_BPB > 1
+    assert(tp.trim.blocks % LATE_ROUND_BPB == 0);
+    checkCudaErrors_V(cudaFuncSetAttribute(RoundMulti<EDGES_B/4, EDGES_B/4, 0, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_BPB, LATE_ROUND_SELF_ZERO_IDX>,
+                                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                           LATE_ROUND_MULTI_SMEM));
+    checkCudaErrors_V(cudaFuncSetAttribute(RoundMulti<EDGES_B/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_BPB, LATE_ROUND_SELF_ZERO_IDX>,
+                                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                           LATE_ROUND_MULTI_SMEM));
+#endif
     checkCudaErrors_V(cudaMemcpy(dt, this, sizeof(edgetrimmer), cudaMemcpyHostToDevice));
     initsuccess = true;
   }
@@ -1068,7 +1189,11 @@ struct edgetrimmer {
 #if !LATE_ROUND_SELF_ZERO_IDX
       memset_zero(indexesE[1], indexesSize);
 #endif
+#if LATE_ROUND_BPB > 1
+      RoundMulti<EDGES_B/4, EDGES_B/4, 0, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_BPB, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks / LATE_ROUND_BPB, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb, LATE_ROUND_MULTI_SMEM, stream>>>((const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]);
+#else
       Round<1, EDGES_B/4, EDGES_B/4, 0, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb, 0, stream>>>((const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]);
+#endif
       if (abort) return false;
 #if FUSE_FINAL_TAIL_CURRENT
       if (round + 2 >= tp.ntrims) {
@@ -1083,7 +1208,11 @@ struct edgetrimmer {
 #if !LATE_ROUND_SELF_ZERO_IDX
       memset_zero(indexesE[0], indexesSize);
 #endif
+#if LATE_ROUND_BPB > 1
+      RoundMulti<EDGES_B/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_BPB, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks / LATE_ROUND_BPB, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb, LATE_ROUND_MULTI_SMEM, stream>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]);
+#else
       Round<1, EDGES_B/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb, 0, stream>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]);
+#endif
       if (abort) return false;
     }
     TARI_ROUND_TIMING_END(timingLate);
