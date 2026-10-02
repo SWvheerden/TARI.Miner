@@ -308,6 +308,12 @@ set "TARI_ARCH_FLAGS=-DTARI_C29_DEFAULT_NTRIMS=48 -DROUND23_TPB=960"
 build_solver.bat sm_89
 ```
 
+Experimental trim options, each off by default and pending GPU measurement.
+Try them through `TARI_ARCH_FLAGS`:
+
+- `-DLATE_ROUND_SELF_ZERO_IDX=1`: rounds 2, 3 and the late rounds clear the
+  bucket counts they read, replacing the per-round index memsets.
+
 `tests/tari_c29_gpu_recall.py` takes the expected release trim count from
 `-DTARI_C29_DEFAULT_NTRIMS=` in the same file (50 if absent). It honours
 `TARI_ARCH_FLAGS` too, so keep it set to the value the candidate solver was

@@ -32,6 +32,24 @@ jobs:
       - name: Build solver and pool miner for all shipped architectures
         run: ./build_all.sh
 
+      # Experimental trim options are off by default. Compile each one, and
+      # the combinations that interact, so they keep building until the GPU
+      # measurements decide whether to enable them.
+      - name: Build experimental trim option matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          flag_sets=(
+            "-DLATE_ROUND_SELF_ZERO_IDX=1"
+            "-DLATE_ROUND_SELF_ZERO_IDX=1 -DFUSE_FINAL_TAIL_CURRENT=1 -DSKIP_LATE_NULL_CHECKS=0 -DRECOVERY_SMALL_OUTPUT=0"
+            "-DLATE_ROUND_SELF_ZERO_IDX=1 -DTRIM_STAGE_TIMING=1"
+          )
+          for flags in "${flag_sets[@]}"; do
+            echo "::group::solver sm_89: $flags"
+            TARI_ARCH_FLAGS="$flags" ./build_solver.sh sm_89
+            echo "::endgroup::"
+          done
+
   linux:
     name: Linux CPU and script checks
     runs-on: ubuntu-latest

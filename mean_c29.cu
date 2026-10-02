@@ -8,6 +8,7 @@
 #include <vector>
 #include <assert.h>
 #include <algorithm>
+#include <type_traits>
 #include "cuckaroo.hpp"
 #include "graph.hpp"
 #include "../crypto/siphash.cuh"
@@ -151,6 +152,11 @@ const u32 ROW_EDGES_B = EDGES_B * NY;
 #endif
 #ifndef FUSE_FINAL_TAIL_CURRENT
 #define FUSE_FINAL_TAIL_CURRENT 0
+#endif
+// Experimental. Rounds 2, 3 and the late rounds zero their source bucket
+// counts once they have read them, replacing the per-round index memsets.
+#ifndef LATE_ROUND_SELF_ZERO_IDX
+#define LATE_ROUND_SELF_ZERO_IDX 0
 #endif
 // Number of Parts of BufferB, all but one of which will overlap BufferA
 #ifndef NB
@@ -558,8 +564,13 @@ __global__ void Round0DstHashDynamic(const uint2 * __restrict__ src, uint2 * __r
 
 #endif
 
-template<int NP, int maxIn, int maxOut, int UORV, int CHECK_NULL>
-__global__ void Round(const uint2 * __restrict__ src, uint2 * __restrict__ dst, const u32 * __restrict__ srcIdx, u32 * __restrict__ dstIdx) {
+// With ZERO_SRC_IDX, block `group` (the only reader of srcIdx[group]) zeroes
+// that count after its last read, so the index buffer is already clear when a
+// later round uses it as its destination.
+template<int NP, int maxIn, int maxOut, int UORV, int CHECK_NULL, int ZERO_SRC_IDX = 0>
+__global__ void Round(const uint2 * __restrict__ src, uint2 * __restrict__ dst,
+                      typename std::conditional<ZERO_SRC_IDX != 0, u32, const u32>::type * __restrict__ srcIdx,
+                      u32 * __restrict__ dstIdx) {
   const int group = blockIdx.x;
   const int dim = blockDim.x;
   const int lid = threadIdx.x;
@@ -643,6 +654,15 @@ __global__ void Round(const uint2 * __restrict__ src, uint2 * __restrict__ dst, 
         }
       }
     }
+  }
+
+  if constexpr (ZERO_SRC_IDX != 0) {
+    static_assert(NP == 1, "ZERO_SRC_IDX supports single-part rounds only");
+    srcIdx -= NP * NX2;
+    // Every thread has read srcIdx[group] for the second pass.
+    __syncthreads();
+    if (lid == 0)
+      srcIdx[group] = 0;
   }
 }
 
@@ -832,6 +852,9 @@ struct edgetrimmer {
                                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                                            ROUND0_DST_HASH_DYNAMIC_WORDS * sizeof(u32)));
 #endif
+#if LATE_ROUND_SELF_ZERO_IDX
+    assert(tp.trim.blocks == NX2); // one trim block per bucket, so every count gets zeroed
+#endif
     checkCudaErrors_V(cudaMemcpy(dt, this, sizeof(edgetrimmer), cudaMemcpyHostToDevice));
     initsuccess = true;
   }
@@ -945,14 +968,16 @@ struct edgetrimmer {
     TARI_TIMING_BEGIN();
     cudaMemset(indexesE[1], 0, indexesSize);
 
-    Round<1, EDGES_B/2, EDGES_A/4, 0, !SKIP_LATE_NULL_CHECKS><<<tp.trim.blocks, ROUND23_TPB ? ROUND23_TPB : tp.trim.tpb>>>((const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]); // to .176
+    Round<1, EDGES_B/2, EDGES_A/4, 0, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks, ROUND23_TPB ? ROUND23_TPB : tp.trim.tpb>>>((const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]); // to .176
     if (abort) return false;
     TARI_TIMING_END(timingRound2);
 
     TARI_TIMING_BEGIN();
+#if !LATE_ROUND_SELF_ZERO_IDX
     cudaMemset(indexesE[0], 0, indexesSize);
+#endif // else Round 2 zeroed indexesE[0], its source
 
-    Round<1, EDGES_A/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS><<<tp.trim.blocks, ROUND23_TPB ? ROUND23_TPB : tp.trim.tpb>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]); // to .117
+    Round<1, EDGES_A/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks, ROUND23_TPB ? ROUND23_TPB : tp.trim.tpb>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]); // to .117
     if (abort) return false;
     TARI_TIMING_END(timingRound3);
 
@@ -961,20 +986,30 @@ struct edgetrimmer {
 #endif
 
     TARI_TIMING_BEGIN();
+    // With LATE_ROUND_SELF_ZERO_IDX every round from Round 2 on zeroes the
+    // index buffer it read, which is the destination of the next kernel:
+    // Round 3 leaves indexesE[1] clear, each first late round indexesE[0] and
+    // each second late round indexesE[1] again.
     for (int round = 4; round < tp.ntrims; round += 2) {
+#if !LATE_ROUND_SELF_ZERO_IDX
       cudaMemset(indexesE[1], 0, indexesSize);
-      Round<1, EDGES_B/4, EDGES_B/4, 0, !SKIP_LATE_NULL_CHECKS><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb>>>((const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]);
+#endif
+      Round<1, EDGES_B/4, EDGES_B/4, 0, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb>>>((const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]);
       if (abort) return false;
 #if FUSE_FINAL_TAIL_CURRENT
       if (round + 2 >= tp.ntrims) {
+#if !LATE_ROUND_SELF_ZERO_IDX
         cudaMemset(indexesE[0], 0, indexesSize);
+#endif
         FusedFinalTail<EDGES_B/4><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]);
         if (abort) return false;
         break;
       }
 #endif
+#if !LATE_ROUND_SELF_ZERO_IDX
       cudaMemset(indexesE[0], 0, indexesSize);
-      Round<1, EDGES_B/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]);
+#endif
+      Round<1, EDGES_B/4, EDGES_B/4, 1, !SKIP_LATE_NULL_CHECKS, LATE_ROUND_SELF_ZERO_IDX><<<tp.trim.blocks, ROUND_LATE_TPB ? ROUND_LATE_TPB : tp.trim.tpb>>>((const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]);
       if (abort) return false;
     }
     TARI_TIMING_END(timingLate);
@@ -986,7 +1021,9 @@ struct edgetrimmer {
     TARI_TIMING_END(timingTail);
 #else
     TARI_TIMING_BEGIN();
+#if !LATE_ROUND_SELF_ZERO_IDX
     cudaMemset(indexesE[1], 0, indexesSize);
+#endif // else the last reader of indexesE[1] (Round 3 or a late round) zeroed it
 #if !SQUASH_OUTPUT
     cudaDeviceSynchronize();
 #endif
