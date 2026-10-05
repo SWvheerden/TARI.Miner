@@ -21,6 +21,7 @@
 
 #include "tari_miner_pipeline.h"
 #include "tari_miner_reliability.h"
+#include "tari_miner_stats.h"
 #include "tari_pool_protocol.h"
 #include "tari_miner_worker.h"
 
@@ -807,6 +808,9 @@ int main(int argc, char **argv) {
     std::vector<tari_miner::SolverWatchdog> solver_watchdogs(contexts.size());
     double start = now_sec();
     double last_report = start;
+    // Outside the reconnect loop so a disconnected period shows as a lower
+    // rolling rate instead of being forgotten.
+    tari_miner::SpeedMeter speed_meter;
 
     auto observe_trim = [&](int context, const SolverTrimResult &trim) {
         tari_miner::SolverWatchdog &watchdog = solver_watchdogs[(size_t)context];
@@ -959,12 +963,16 @@ int main(int argc, char **argv) {
 
         auto report_speed = [&]() {
             double t = now_sec();
-            if (t - last_report >= 15.0) {
-                double gsec = graphs / (t - start);
-                printf("speed %.2f g/s | graphs=%llu cycles=%llu submitted=%llu accepted=%llu rejected=%llu\n",
-                       gsec, (unsigned long long)graphs, (unsigned long long)cycles,
-                       (unsigned long long)submitted, (unsigned long long)pool.accepted(),
-                       (unsigned long long)pool.rejected());
+            if (t - last_report >= tari_miner::SPEED_REPORT_INTERVAL_SEC) {
+                speed_meter.sample(t, graphs);
+                double lifetime = tari_miner::average_rate(graphs, t - start);
+                // The first report has no earlier sample to measure from.
+                double rolling = speed_meter.size() < 2
+                    ? lifetime
+                    : speed_meter.rolling_rate(tari_miner::SPEED_WINDOW_SEC);
+                printf("%s\n", tari_miner::format_speed_line(
+                    rolling, lifetime, graphs, cycles, submitted,
+                    pool.accepted(), pool.rejected()).c_str());
                 last_report = t;
             }
         };

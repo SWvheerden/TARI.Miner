@@ -88,6 +88,13 @@ jobs:
             -o tests/tari_miner_pipeline_test
           tests/tari_miner_pipeline_test
 
+      - name: Build and run speed meter regressions
+        run: |
+          g++ -std=c++17 -O2 -I. \
+            tests/tari_miner_stats_test.cpp \
+            -o tests/tari_miner_stats_test
+          tests/tari_miner_stats_test
+
       - name: Build and run worker thread regressions
         run: |
           g++ -std=c++17 -O2 -pthread -I. \
@@ -116,10 +123,14 @@ jobs:
             tests/build_flags_test.sh \
             hiveos/h-config.sh \
             hiveos/h-run.sh \
-            hiveos/h-stats.sh
+            hiveos/h-stats.sh \
+            tests/hiveos_stats_test.sh
 
       - name: Run shell launcher regressions
         run: bash tests/start_c29_launcher_test.sh
+
+      - name: Run HiveOS stats parse regressions
+        run: bash tests/hiveos_stats_test.sh
 
       - name: Run build flag reader regressions
         run: bash tests/build_flags_test.sh
@@ -148,6 +159,8 @@ jobs:
             'tests\tari_miner_reliability_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_miner_pipeline_test.cpp /Fe:tests\tari_miner_pipeline_test.exe',
             'tests\tari_miner_pipeline_test.exe',
+            'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_miner_stats_test.cpp /Fe:tests\tari_miner_stats_test.exe',
+            'tests\tari_miner_stats_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_miner_worker_test.cpp /Fe:tests\tari_miner_worker_test.exe',
             'tests\tari_miner_worker_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 tari_c29.cpp tari_c29_selftest.cpp /Fe:tari_c29_selftest.exe',
