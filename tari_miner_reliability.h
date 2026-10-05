@@ -396,11 +396,59 @@ inline double reconnect_pause_seconds(double connection_sec) {
 // cycle search or a share, because the pool has moved on to a higher block.
 // Height 0 means the pool did not send one, so nothing is skipped. A new job
 // at the same height (a template refresh) still takes shares, and a lower
-// height (a reorg or rollback) is not treated as newer.
+// height (a reorg or rollback) is not treated as newer. This assumes the pool
+// rejects shares for an older height; a pool with a stale-share grace window
+// loses the few shares per block that would have been found in this work.
 inline bool is_superseded(uint64_t work_height, uint64_t latest_height) {
     if (work_height == 0 || latest_height == 0)
         return false;
     return latest_height > work_height;
 }
+
+// Real blocks arrive tens of seconds apart. More height increases than this
+// in one window means the pool's heights cannot be trusted to skip work.
+constexpr unsigned HEIGHT_CHURN_LIMIT = 3;
+constexpr double HEIGHT_CHURN_WINDOW_SEC = 60.0;
+
+// Counts increases in the pool's job height. A pool (or anything in between)
+// that raises the height faster than blocks arrive could otherwise make every
+// graph look superseded, so no share would ever be sent. Holds no clock: the
+// caller passes the time in. Use from one thread only.
+class HeightChurnGuard {
+public:
+    // Call with the latest job height whenever it is read. Returns true when
+    // a height increase may be used to skip stale work. Past the limit it
+    // returns false for the rest of the window, and sets warn once then.
+    bool observe(uint64_t height, double t_sec, bool &warn) {
+        warn = false;
+        if (!started_ || t_sec - window_start_ >= HEIGHT_CHURN_WINDOW_SEC ||
+            t_sec < window_start_) {
+            started_ = true;
+            window_start_ = t_sec;
+            increases_ = 0;
+            warned_ = false;
+        }
+        if (last_height_ != 0 && height > last_height_)
+            increases_++;
+        if (height != 0)
+            last_height_ = height;
+        if (increases_ <= HEIGHT_CHURN_LIMIT)
+            return true;
+        if (!warned_) {
+            warned_ = true;
+            warn = true;
+        }
+        return false;
+    }
+
+    unsigned increases() const { return increases_; }
+
+private:
+    bool started_ = false;
+    double window_start_ = 0.0;
+    uint64_t last_height_ = 0;
+    unsigned increases_ = 0;
+    bool warned_ = false;
+};
 
 } // namespace tari_miner

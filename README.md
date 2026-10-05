@@ -77,7 +77,10 @@ attempt itself is blocked (an unreachable pool host can block a connect for up
 to about two minutes) and during the wait of up to 20 seconds for the first
 job after connecting. HiveOS shows 0 once the newest report is more than 90
 seconds old. `accepted` and `rejected` count shares since the miner started,
-across reconnects, and `t` is the report time in Unix seconds.
+across reconnects, and `t` is the report time in Unix seconds. `stale`
+counts graphs that were not searched for shares because the pool had already
+moved to a higher block height. Pools that still accept shares for the
+previous block for a short time may lose a few shares per block this way.
 
 Pools that expect `wallet/worker` rather than `wallet.worker` need the login
 separator set alongside the pool:

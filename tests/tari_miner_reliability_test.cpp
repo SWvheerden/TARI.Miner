@@ -443,6 +443,60 @@ static void test_superseded_job() {
           "a lower height (reorg or rollback) does not supersede");
 }
 
+static void test_height_churn_guard() {
+    std::puts("Height churn guard:");
+    bool warn = false;
+    {
+        // One block every 30 s, for ten minutes.
+        tari_miner::HeightChurnGuard guard;
+        bool trusted = true;
+        bool warned = false;
+        for (int i = 0; i <= 20; ++i) {
+            trusted = trusted && guard.observe(1000 + i, 30.0 * i, warn);
+            warned = warned || warn;
+        }
+        check(trusted && !warned, "a normal block cadence is trusted");
+    }
+    {
+        tari_miner::HeightChurnGuard guard;
+        check(guard.observe(100, 0.0, warn), "the first height is trusted");
+        check(guard.observe(100, 0.5, warn), "an unchanged height is trusted");
+        bool trusted = true;
+        for (int i = 1; i <= 3; ++i)
+            trusted = trusted && guard.observe(100 + i, i, warn);
+        check(trusted && !warn, "up to the limit of increases is trusted");
+        check(!guard.observe(104, 4.0, warn) && warn,
+              "one more increase in the window is not trusted, with a warning");
+        check(!guard.observe(105, 5.0, warn) && !warn,
+              "later increases stay untrusted, with no second warning");
+        check(!guard.observe(105, 59.0, warn) && !warn,
+              "the rest of the window stays untrusted");
+        check(guard.observe(106, 60.0, warn) && !warn,
+              "a new window is trusted again");
+
+        bool warned = false;
+        for (int i = 0; i < 10; ++i) {
+            guard.observe(200 + i, 61.0 + i, warn);
+            warned = warned || warn;
+        }
+        check(warned, "churn in the next window warns again");
+        check(guard.observe(300, 30.0, warn),
+              "time going backwards starts a new window");
+    }
+    {
+        tari_miner::HeightChurnGuard guard;
+        const uint64_t huge = std::numeric_limits<uint64_t>::max();
+        check(guard.observe(100, 0.0, warn), "a normal height is trusted");
+        check(guard.observe(huge, 1.0, warn), "a single huge height counts once");
+        check(!tari_miner::is_superseded(huge, 101),
+              "work for the huge height is not superseded by a normal one");
+        check(guard.observe(101, 2.0, warn) && guard.observe(102, 30.0, warn),
+              "heights after the huge one are still trusted");
+        check(tari_miner::is_superseded(101, 102),
+              "the next real block still supersedes");
+    }
+}
+
 int main() {
     test_wallet_validation();
     test_tari_address_charset();
@@ -456,6 +510,7 @@ int main() {
     test_log_rate_limiter();
     test_reconnect_pause();
     test_superseded_job();
+    test_height_churn_guard();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");

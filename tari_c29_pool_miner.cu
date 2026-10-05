@@ -839,6 +839,7 @@ int main(int argc, char **argv) {
     uint64_t graphs = 0, cycles = 0, submitted = 0, verify_failures = 0;
     // Trimmed graphs not searched because the pool moved to a higher block.
     uint64_t stale_skipped = 0;
+    tari_miner::HeightChurnGuard height_guard;
     int exit_code = 0;
     tari_miner::LoginFailurePolicy login_failures;
     tari_miner::PoolSilencePolicy pool_silence;
@@ -1034,6 +1035,20 @@ int main(int argc, char **argv) {
             }
         };
 
+        // Says whether the latest job height can be used to skip stale work.
+        // A height that keeps rising faster than blocks arrive is ignored, so
+        // it cannot stop every share.
+        auto height_trusted = [&](uint64_t latest_height) -> bool {
+            bool warn = false;
+            bool trusted = height_guard.observe(latest_height, now_sec(), warn);
+            if (warn)
+                fprintf(stderr,
+                        "pool height changing too fast (%u increases in %.0fs); "
+                        "not skipping stale work\n",
+                        height_guard.increases(), tari_miner::HEIGHT_CHURN_WINDOW_SEC);
+            return trusted;
+        };
+
         auto report_speed = [&]() {
             report_speed_with(accepted_before + pool.accepted(),
                               rejected_before + pool.rejected());
@@ -1094,7 +1109,9 @@ int main(int argc, char **argv) {
                 break;
             // Shares for a block the pool has moved past would be rejected
             // as stale, so skip the cycle search for them.
-            bool superseded = tari_miner::is_superseded(job.height, pool.current_job().height);
+            uint64_t latest_height = pool.current_job().height;
+            bool superseded = height_trusted(latest_height) &&
+                tari_miner::is_superseded(job.height, latest_height);
             if (superseded)
                 stale_skipped++;
             if (trim.nedges && !superseded) {
@@ -1192,8 +1209,10 @@ int main(int argc, char **argv) {
                     break;
                 // A trim queued before the pool moved to a higher block is not
                 // worth a cycle search: its shares would be rejected as stale.
-                bool superseded = tari_miner::is_superseded(
-                    pending[(size_t)slot].job.height, pool.current_job().height);
+                uint64_t latest_height = pool.current_job().height;
+                bool superseded = height_trusted(latest_height) &&
+                    tari_miner::is_superseded(pending[(size_t)slot].job.height,
+                                              latest_height);
                 if (superseded)
                     stale_skipped++;
                 if (trim.nedges && !superseded) {

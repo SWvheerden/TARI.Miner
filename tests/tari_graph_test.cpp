@@ -220,9 +220,10 @@ static void test_uncompressed_graph(std::mt19937 &rng) {
                sets, "uncompressed sharedmem", &sols);
 }
 
-// After the first full clear, reset() must only touch the entries the
-// previous graph used. A marker past those entries survives it, but not
-// reset_full().
+// After the first full clear, reset() on a graph that owns its memory must
+// only touch the entries the previous graph used: a marker past those
+// entries survives it, but not reset_full(). A graph on shared memory always
+// clears in full.
 static void test_reset_is_sparse(std::mt19937 &rng) {
     std::puts("Sparse reset path:");
     graph<word_t> g(MAXEDGES, MAXEDGES, MAXSOLS, IDXSHIFT);
@@ -236,6 +237,20 @@ static void test_reset_is_sparse(std::mt19937 &rng) {
           "reset() leaves entries past the used ids alone");
     g.reset_full();
     check(fully_reset(g), "reset_full() clears everything");
+
+    const u32 compressbits = 17;
+    const word_t maxedges = 8192;
+    const word_t maxnodes = 4096;
+    std::unique_ptr<char[]> bytes(new char[sizeof(word_t) * 2 * (size_t)maxnodes +
+                                           sizeof(graph<word_t>::link) * 2 * (size_t)maxedges +
+                                           2 * sizeof(word_t) * ((size_t)2 << (EDGEBITS - compressbits))]);
+    graph<word_t> shared(maxedges, maxnodes, MAXSOLS, compressbits, bytes.get());
+    shared.reset();
+    add_all(shared, make_edges(100, true, rng));
+    shared.adjlist[maxnodes - 1] = marker;
+    shared.reset();
+    check(shared.adjlist[maxnodes - 1] == graph<word_t>::NIL && fully_reset(shared),
+          "reset() on shared memory clears everything");
 }
 
 // Informational CPU-only timing of reset() per graph, at a typical

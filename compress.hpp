@@ -50,6 +50,10 @@ public:
     MASK2 = SIZE2-1;
   }
 
+  // Owns heap memory, so copies would double-free.
+  compressor(const compressor &) = delete;
+  compressor &operator=(const compressor &) = delete;
+
   ~compressor() {
     if (!sharedmem)
       delete[] nodes;
@@ -74,7 +78,10 @@ public:
   }
 
   word_t compress(word_t u) {
-    word_t ui = u >> SHIFTBITS;
+    // Masked so a node outside NODEBITS cannot index past nodes (or be
+    // replayed out of range by reset_sparse). Trimmed nodes are already
+    // below 2^NODEBITS, so for them this changes nothing.
+    word_t ui = (u >> SHIFTBITS) & MASK2;
     for (; ; ui = (ui+1) & MASK2) {
       word_t cu = nodes[ui];
       if (cu == NIL) {
