@@ -69,9 +69,9 @@ periodic speed report. Warnings and connection errors go to `gpu0.err.log`
 alongside it. The two streams are separate files on Windows; the Linux starter
 combines them into one.
 
-In the speed report, `speed` is the graph rate over about the last 60 seconds and
-`avg` is the average since the miner started. The rolling rate shows changes
-quickly, including time lost to reconnects.
+In the speed report, `speed` is the graph rate over about the last 60
+seconds and `avg` is the average since the miner started. The rolling rate
+shows changes quickly, including time lost to reconnects.
 
 Pools that expect `wallet/worker` rather than `wallet.worker` need the login
 separator set alongside the pool:
