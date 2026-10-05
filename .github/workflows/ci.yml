@@ -102,6 +102,16 @@ jobs:
             -o tests/tari_miner_worker_test
           tests/tari_miner_worker_test
 
+      - name: Build and run cycle-finding graph regressions
+        run: |
+          for skip in 0 1; do
+            g++ -std=c++17 -O2 -DGRAPH_UNION_SKIP=$skip \
+              -I. -Ithird_party/cuckoo/src/cuckaroo \
+              tests/tari_graph_test.cpp \
+              -o tests/tari_graph_test
+            tests/tari_graph_test
+          done
+
       - name: Run GPU recall verifier fixtures
         run: python3 tests/tari_c29_gpu_recall.py --self-test
 
@@ -168,6 +178,10 @@ jobs:
             'tests\tari_miner_stats_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_miner_worker_test.cpp /Fe:tests\tari_miner_worker_test.exe',
             'tests\tari_miner_worker_test.exe',
+            'cl /nologo /std:c++17 /EHsc /O2 /DGRAPH_UNION_SKIP=0 /I. /Ithird_party\cuckoo\src\cuckaroo tests\tari_graph_test.cpp /Fe:tests\tari_graph_test.exe',
+            'tests\tari_graph_test.exe',
+            'cl /nologo /std:c++17 /EHsc /O2 /DGRAPH_UNION_SKIP=1 /I. /Ithird_party\cuckoo\src\cuckaroo tests\tari_graph_test.cpp /Fe:tests\tari_graph_test.exe',
+            'tests\tari_graph_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 tari_c29.cpp tari_c29_selftest.cpp /Fe:tari_c29_selftest.exe',
             'tari_c29_selftest.exe'
           ) -join ' && '

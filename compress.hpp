@@ -18,6 +18,10 @@ public:
   word_t nnodes;
   const word_t NIL = ~(word_t)0;
   word_t *nodes;
+  // slots[i] is the hash slot holding id i, so reset_sparse() can clear
+  // only the slots used since the last reset. Never part of the shared
+  // bytes() layout.
+  word_t *slots;
   bool sharedmem;
 
   compressor(u32 nodebits, u32 compressbits, char *bytes) {
@@ -27,6 +31,7 @@ public:
     SIZE = (word_t)1 << SIZEBITS;
     SIZE2 = (word_t)2 << SIZEBITS;
     nodes = new (bytes) word_t[SIZE2];
+    slots = new word_t[SIZE];
     sharedmem = true;
     MASK = SIZE-1;
     MASK2 = SIZE2-1;
@@ -39,6 +44,7 @@ public:
     SIZE = (word_t)1 << SIZEBITS;
     SIZE2 = (word_t)2 << SIZEBITS;
     nodes = new word_t[SIZE2];
+    slots = new word_t[SIZE];
     sharedmem = false;
     MASK = SIZE-1;
     MASK2 = SIZE2-1;
@@ -47,6 +53,7 @@ public:
   ~compressor() {
     if (!sharedmem)
       delete[] nodes;
+    delete[] slots;
   }
 
   uint64_t bytes() {
@@ -55,6 +62,14 @@ public:
 
   void reset() {
     memset(nodes, (char)NIL, (sizeof(word_t)*(size_t)SIZE2));
+    nnodes = 0;
+  }
+
+  // Clears only the slots filled since the last reset. nodes must already
+  // be fully cleared once by reset().
+  void reset_sparse() {
+    for (word_t i = 0; i < nnodes; i++)
+      nodes[slots[i]] = NIL;
     nnodes = 0;
   }
 
@@ -68,6 +83,7 @@ public:
           return 0;
         }
         nodes[ui] = u << SIZEBITS | nnodes;
+        slots[nnodes] = ui;
         return nnodes++;
       }
       if ((cu & ~MASK) == u << SIZEBITS) {
