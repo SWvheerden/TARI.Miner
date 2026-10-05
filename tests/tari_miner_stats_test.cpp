@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <string>
 
@@ -221,12 +222,23 @@ int main() {
     expect_rate("average rate zero time", 0.0, tari_miner::average_rate(25, 0.0));
     expect_rate("average rate negative time", 0.0, tari_miner::average_rate(25, -1.0));
 
-    expect_line(
-        "speed line",
-        "speed 13.65 g/s | avg 12.10 g/s | graphs=7260 cycles=12 submitted=3 "
-        "accepted=2 rejected=1 t=1791158400",
-        tari_miner::format_speed_line(13.649, 12.1, 7260, 12, 3, 2, 1, 1791158400)
-    );
+    // tests/hiveos_stats_test.sh feeds the same fixture through h-stats.sh,
+    // so the miner and the HiveOS parser cannot drift apart. Run from the
+    // repository root, as CI does.
+    {
+        std::ifstream fixture("tests/fixtures/speed_line.txt");
+        std::string expected;
+        if (!std::getline(fixture, expected)) {
+            std::fprintf(stderr, "FAIL cannot read tests/fixtures/speed_line.txt\n");
+            failures++;
+        }
+        if (!expected.empty() && expected.back() == '\r')
+            expected.pop_back();
+        expect_line(
+            "speed line fixture", expected.c_str(),
+            tari_miner::format_speed_line(13.649, 12.1, 7260, 12, 3, 2, 1, 1791158400)
+        );
+    }
     expect_line(
         "speed line non-finite",
         "speed 0.00 g/s | avg 0.00 g/s | graphs=0 cycles=0 submitted=0 "

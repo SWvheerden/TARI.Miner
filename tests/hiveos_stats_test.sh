@@ -59,6 +59,18 @@ speed 1e300 g/s | avg 1.00 g/s | graphs=1 cycles=0 submitted=0 accepted=0 reject
 graphs=7300 elapsed=600.00s speed=12.167 g/s cycles=12 submitted=3 verify_failures=0
 EOF
 
+# The miner's own output, shared with tests/tari_miner_stats_test.cpp, with
+# the report time moved to now.
+fixture="$(tr -d '\r' < "$ROOT/tests/fixtures/speed_line.txt" | sed "s/ t=[0-9]*/ t=$now/")"
+check "miner fixture" '"hs":[13.650]' '"ar":[2,1]' <<EOF
+$fixture
+EOF
+
+# Fields added after t= (such as stale=) must not break parsing.
+check "trailing field" '"hs":[13.650]' '"ar":[2,1]' <<EOF
+$fixture stale=0
+EOF
+
 # A report older than 90 s means the miner stopped reporting; the counters
 # are still the last known ones.
 check "stale report" '"hs":[0.000]' '"ar":[2,1]' <<EOF

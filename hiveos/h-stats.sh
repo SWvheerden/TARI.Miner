@@ -62,10 +62,11 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
     if [[ -f "$log_file" && $((now - $(stat -c %Y "$log_file" 2>/dev/null || echo 0))) -le 180 ]]; then
         # Only a whole line in the miner's own report format counts. Pool text
         # is always logged after a prefix such as "pool error:", so it cannot
-        # forge one. Over-long numbers are ignored, and a report older than
+        # forge one. Fields are read by position; later key=number fields after
+        # t= are allowed. Over-long numbers are ignored, and a report older than
         # 90 s means the miner has stopped reporting, so the rate drops to 0.
         read -r rate gpu_accepted gpu_rejected < <(LC_ALL=C awk -v now="$now" '
-            /^speed [0-9]+\.[0-9]+ g\/s \| avg [0-9]+\.[0-9]+ g\/s \| graphs=[0-9]+ cycles=[0-9]+ submitted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ t=[0-9]+$/ {
+            /^speed [0-9]+\.[0-9]+ g\/s \| avg [0-9]+\.[0-9]+ g\/s \| graphs=[0-9]+ cycles=[0-9]+ submitted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ t=[0-9]+( [a-z_]+=[0-9]+)*$/ {
                 a = substr($12, 10)
                 r = substr($13, 10)
                 t = substr($14, 3)
