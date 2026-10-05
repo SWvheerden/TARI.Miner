@@ -392,4 +392,15 @@ inline double reconnect_pause_seconds(double connection_sec) {
     return SHORT_CONNECTION_SEC - connection_sec;
 }
 
+// True when a graph trimmed for a job at work_height is no longer worth a
+// cycle search or a share, because the pool has moved on to a higher block.
+// Height 0 means the pool did not send one, so nothing is skipped. A new job
+// at the same height (a template refresh) still takes shares, and a lower
+// height (a reorg or rollback) is not treated as newer.
+inline bool is_superseded(uint64_t work_height, uint64_t latest_height) {
+    if (work_height == 0 || latest_height == 0)
+        return false;
+    return latest_height > work_height;
+}
+
 } // namespace tari_miner

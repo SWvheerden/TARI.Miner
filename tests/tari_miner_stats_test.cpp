@@ -236,16 +236,16 @@ int main() {
             expected.pop_back();
         expect_line(
             "speed line fixture", expected.c_str(),
-            tari_miner::format_speed_line(13.649, 12.1, 7260, 12, 3, 2, 1, 1791158400)
+            tari_miner::format_speed_line(13.649, 12.1, 7260, 12, 3, 2, 1, 1791158400, 4)
         );
     }
     expect_line(
         "speed line non-finite",
         "speed 0.00 g/s | avg 0.00 g/s | graphs=0 cycles=0 submitted=0 "
-        "accepted=0 rejected=0 t=0",
+        "accepted=0 rejected=0 t=0 stale=0",
         tari_miner::format_speed_line(
             std::numeric_limits<double>::quiet_NaN(),
-            std::numeric_limits<double>::infinity(), 0, 0, 0, 0, 0, -5
+            std::numeric_limits<double>::infinity(), 0, 0, 0, 0, 0, -5, 0
         )
     );
 

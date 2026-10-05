@@ -72,9 +72,9 @@ check "miner fixture" '"hs":[13.650]' '"ar":[2,1]' <<EOF
 $fixture
 EOF
 
-# The stale= field from a later miner must not break parsing.
-check "trailing field" '"hs":[13.650]' '"ar":[2,1]' <<EOF
-$fixture stale=0
+# A line from an older miner, without the trailing stale= field, still parses.
+check "no stale field" '"hs":[13.650]' '"ar":[2,1]' <<EOF
+${fixture% stale=*}
 EOF
 
 # Any other trailing field is rejected, such as diff= or xn= text from the

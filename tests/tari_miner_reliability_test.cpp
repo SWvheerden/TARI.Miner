@@ -427,6 +427,22 @@ static void test_reconnect_pause() {
           "an unknown duration waits the full window");
 }
 
+static void test_superseded_job() {
+    std::puts("Superseded job:");
+    check(tari_miner::is_superseded(100, 101),
+          "a job at a higher height supersedes the work");
+    check(!tari_miner::is_superseded(100, 100),
+          "a new job at the same height (template refresh) does not");
+    check(!tari_miner::is_superseded(0, 101),
+          "unknown work height is never superseded");
+    check(!tari_miner::is_superseded(100, 0),
+          "unknown latest height never supersedes");
+    check(!tari_miner::is_superseded(0, 0),
+          "both heights unknown is not superseded");
+    check(!tari_miner::is_superseded(100, 99),
+          "a lower height (reorg or rollback) does not supersede");
+}
+
 int main() {
     test_wallet_validation();
     test_tari_address_charset();
@@ -439,6 +455,7 @@ int main() {
     test_solver_watchdog();
     test_log_rate_limiter();
     test_reconnect_pause();
+    test_superseded_job();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");

@@ -88,6 +88,8 @@ inline double average_rate(uint64_t graphs, double elapsed_sec) {
 // from an old one. h-stats.sh only accepts a line in exactly this format and
 // reads its fields by position. Add any new field after t=, and add it to the
 // short list of trailing fields h-stats.sh accepts (currently only stale=).
+// stale counts trimmed graphs whose cycle search was skipped because the pool
+// had moved to a higher block.
 // tests/fixtures/speed_line.txt holds a sample shared by both tests.
 inline std::string format_speed_line(
     double rolling,
@@ -97,7 +99,8 @@ inline std::string format_speed_line(
     uint64_t submitted,
     uint64_t accepted,
     uint64_t rejected,
-    int64_t unix_time
+    int64_t unix_time,
+    uint64_t stale
 ) {
     if (!std::isfinite(rolling) || rolling < 0.0) rolling = 0.0;
     if (!std::isfinite(lifetime) || lifetime < 0.0) lifetime = 0.0;
@@ -106,10 +109,11 @@ inline std::string format_speed_line(
     std::snprintf(
         line, sizeof(line),
         "speed %.2f g/s | avg %.2f g/s | graphs=%llu cycles=%llu submitted=%llu "
-        "accepted=%llu rejected=%llu t=%lld",
+        "accepted=%llu rejected=%llu t=%lld stale=%llu",
         rolling, lifetime, (unsigned long long)graphs, (unsigned long long)cycles,
         (unsigned long long)submitted, (unsigned long long)accepted,
-        (unsigned long long)rejected, (long long)unix_time
+        (unsigned long long)rejected, (long long)unix_time,
+        (unsigned long long)stale
     );
     return line;
 }

@@ -837,6 +837,8 @@ int main(int argc, char **argv) {
     }
 
     uint64_t graphs = 0, cycles = 0, submitted = 0, verify_failures = 0;
+    // Trimmed graphs not searched because the pool moved to a higher block.
+    uint64_t stale_skipped = 0;
     int exit_code = 0;
     tari_miner::LoginFailurePolicy login_failures;
     tari_miner::PoolSilencePolicy pool_silence;
@@ -867,7 +869,7 @@ int main(int argc, char **argv) {
             : speed_meter.rolling_rate(tari_miner::SPEED_WINDOW_SEC);
         printf("%s\n", tari_miner::format_speed_line(
             rolling, lifetime, graphs, cycles, submitted, accepted, rejected,
-            (int64_t)std::time(nullptr)).c_str());
+            (int64_t)std::time(nullptr), stale_skipped).c_str());
         last_report = t;
     };
 
@@ -1090,7 +1092,12 @@ int main(int argc, char **argv) {
                 graphs++;
             if (!observe_trim(0, trim))
                 break;
-            if (trim.nedges) {
+            // Shares for a block the pool has moved past would be rejected
+            // as stale, so skip the cycle search for them.
+            bool superseded = tari_miner::is_superseded(job.height, pool.current_job().height);
+            if (superseded)
+                stale_skipped++;
+            if (trim.nedges && !superseded) {
                 int cycle_rc = ctx->findcycles_copied_status(trim.nedges);
                 if (cycle_rc != cudaSuccess) {
                     report_cuda_failure(
@@ -1100,7 +1107,8 @@ int main(int argc, char **argv) {
                     break;
                 }
             }
-            consume_solutions(ctx, job, nonce);
+            if (!superseded)
+                consume_solutions(ctx, job, nonce);
             report_speed();
             throttle();
         } else {
@@ -1182,7 +1190,13 @@ int main(int argc, char **argv) {
                     graphs++;
                 if (!observe_trim(slot, trim))
                     break;
-                if (trim.nedges) {
+                // A trim queued before the pool moved to a higher block is not
+                // worth a cycle search: its shares would be rejected as stale.
+                bool superseded = tari_miner::is_superseded(
+                    pending[(size_t)slot].job.height, pool.current_job().height);
+                if (superseded)
+                    stale_skipped++;
+                if (trim.nedges && !superseded) {
                     int cycle_rc = slot_ctx->findcycles_copied_status(trim.nedges);
                     if (cycle_rc != cudaSuccess) {
                         report_cuda_failure(
@@ -1192,7 +1206,8 @@ int main(int argc, char **argv) {
                         break;
                     }
                 }
-                consume_solutions(slot_ctx, pending[(size_t)slot].job, pending[(size_t)slot].nonce);
+                if (!superseded)
+                    consume_solutions(slot_ctx, pending[(size_t)slot].job, pending[(size_t)slot].nonce);
                 done++;
                 launch_trim(slot);
                 report_speed();
