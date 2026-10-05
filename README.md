@@ -343,6 +343,12 @@ that decide whether to enable them.
 `TARI_ARCH_FLAGS` too, so keep it set to the value the candidate solver was
 built with when running the recall test.
 
+The standalone solver's summary also reports the surviving edges per graph,
+the time of the host cycle search, and how busy that keeps the main thread
+(`--recall-jsonl` records the same numbers). `tools/ntrims_sweep.ps1` and
+`tools/ntrims_sweep.sh` use them to choose the trim count per architecture;
+`docs/ntrims_sweep.md` has the steps.
+
 ## License
 
 TARI.Miner is GPL-3.0-or-later. Required upstream licenses and attribution are

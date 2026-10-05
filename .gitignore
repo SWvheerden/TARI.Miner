@@ -16,6 +16,7 @@ release/
 SHA256SUMS.txt
 
 # Local captures and tuning probes
+/ntrims-sweep/
 *.jsonl
 _*
 *.log
