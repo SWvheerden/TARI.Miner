@@ -71,10 +71,12 @@ combines them into one.
 
 In the speed report, `speed` is the graph rate over about the last 60
 seconds and `avg` is the average since the miner started. The report keeps
-coming every 15 seconds while the miner reconnects, so time lost to a pool
-outage shows as a falling rate. `accepted` and `rejected` count shares since
-the miner started, across reconnects, and `t` is the report time in Unix
-seconds.
+coming every 15 seconds during the waits between reconnect attempts, so time
+lost to a pool outage shows as a falling rate. It pauses while a connection
+attempt itself is blocked; an unreachable pool host can block a connect for up
+to about two minutes. HiveOS shows 0 once the newest report is more than 90
+seconds old. `accepted` and `rejected` count shares since the miner started,
+across reconnects, and `t` is the report time in Unix seconds.
 
 Pools that expect `wallet/worker` rather than `wallet.worker` need the login
 separator set alongside the pool:

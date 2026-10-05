@@ -816,8 +816,9 @@ int main(int argc, char **argv) {
     // so these keep the reported totals from resetting on reconnect.
     uint64_t accepted_before = 0, rejected_before = 0;
 
-    // Prints the speed report when one is due. Also called while disconnected
-    // so the rolling rate falls during an outage instead of going quiet.
+    // Prints the speed report when one is due. Also called in the waits between
+    // reconnect attempts so the rolling rate falls during an outage. Nothing is
+    // printed while a connection attempt itself is blocked.
     auto report_speed_with = [&](uint64_t accepted, uint64_t rejected) {
         double t = now_sec();
         if (t - last_report < tari_miner::SPEED_REPORT_INTERVAL_SEC)
