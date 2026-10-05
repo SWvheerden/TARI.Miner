@@ -253,6 +253,32 @@ static void test_reset_is_sparse(std::mt19937 &rng) {
           "reset() on shared memory clears everything");
 }
 
+// With asserts compiled out, an edge whose ids did not come from the
+// compressors is dropped, and the next reset() clears in full. Only built
+// with -DNDEBUG; otherwise add_edge would abort.
+static void test_out_of_range_edge(std::mt19937 &rng) {
+#ifdef NDEBUG
+    std::puts("Out-of-range edge (NDEBUG):");
+    graph<word_t> g(MAXEDGES, MAXEDGES, MAXSOLS, IDXSHIFT);
+    g.reset();
+    add_all(g, make_edges(1000, false, rng));
+    const word_t nlinks = g.nlinks;
+    g.add_edge(g.compressu->nnodes + 5, 0);
+    check(g.nlinks == nlinks && g.adjlist[g.compressu->nnodes + 5] == graph<word_t>::NIL,
+          "an out-of-range edge is not written");
+    g.adjlist[MAXEDGES - 1] = 7;
+    g.reset();
+    check(fully_reset(g), "the next reset() clears everything");
+    add_all(g, make_edges(1000, false, rng));
+    g.adjlist[MAXEDGES - 1] = 7;
+    g.reset();
+    check(g.adjlist[MAXEDGES - 1] == 7, "the reset after that is sparse again");
+#else
+    (void)rng;
+    std::puts("Out-of-range edge: skipped (build with -DNDEBUG)");
+#endif
+}
+
 // Informational CPU-only timing of reset() per graph, at a typical
 // post-trim edge count. Edge insertion is not timed.
 static void time_resets(std::mt19937 &rng) {
@@ -286,6 +312,7 @@ int main() {
     test_node_overflow(rng);
     test_uncompressed_graph(rng);
     test_reset_is_sparse(rng);
+    test_out_of_range_edge(rng);
     time_resets(rng);
     if (failures) {
         std::printf("%d failure(s)\n", failures);

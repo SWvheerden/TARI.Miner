@@ -80,7 +80,9 @@ seconds old. `accepted` and `rejected` count shares since the miner started,
 across reconnects, and `t` is the report time in Unix seconds. `stale`
 counts graphs that were not searched for shares because the pool had already
 moved to a higher block height. Pools that still accept shares for the
-previous block for a short time may lose a few shares per block this way.
+previous block for a short time may lose a few shares per block this way;
+pass `--no-stale-skip` to search and submit that work anyway (`stale` then
+stays 0).
 
 Pools that expect `wallet/worker` rather than `wallet.worker` need the login
 separator set alongside the pool:
@@ -151,6 +153,7 @@ Options placed after the starter command are passed to every selected GPU:
 --intensity N           Duty cycle from 1 to 100 percent; defaults to 100
 --pipeline N            Overlapped solver contexts; defaults automatically
 --max-runtime-sec N     Stop after N seconds
+--no-stale-skip         Also search and submit work for a superseded block
 --version               Print version and exit
 ```
 

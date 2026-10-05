@@ -451,4 +451,20 @@ private:
     bool warned_ = false;
 };
 
+// Whether to skip the cycle search for work launched at work_height.
+// hwm_at_launch is the highest height seen when the work was launched, and
+// trusted comes from HeightChurnGuard for latest_height. Work launched below
+// that high-water mark (the pool dipped and may restore the height before the
+// work finishes) is never skipped, so skipping always needs a new highest
+// height. Each one can skip at most the pipeline's queued graphs, and the
+// guard allows at most HEIGHT_CHURN_LIMIT of them per window. After a reorg to
+// a lower height nothing is skipped until the chain passes the old highest
+// height again.
+inline bool should_skip_stale(uint64_t work_height, uint64_t hwm_at_launch,
+                              uint64_t latest_height, bool trusted) {
+    if (!trusted || work_height < hwm_at_launch)
+        return false;
+    return is_superseded(work_height, latest_height);
+}
+
 } // namespace tari_miner

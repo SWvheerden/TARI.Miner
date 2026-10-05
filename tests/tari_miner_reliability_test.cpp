@@ -497,6 +497,32 @@ static void test_height_churn_guard() {
     }
 }
 
+static void test_should_skip_stale() {
+    std::puts("Stale work skip:");
+    check(tari_miner::should_skip_stale(100, 100, 101, true),
+          "work in flight when a new block arrives is skipped");
+    check(!tari_miner::should_skip_stale(100, 100, 101, false),
+          "an untrusted height skips nothing");
+    check(!tari_miner::should_skip_stale(100, 100, 100, true),
+          "work for the current block is not skipped");
+    check(!tari_miner::should_skip_stale(99, 100, 100, true),
+          "work launched during a dip below the highest height is not skipped "
+          "when the height is restored");
+    check(!tari_miner::should_skip_stale(0, 0, 101, true) &&
+              !tari_miner::should_skip_stale(100, 100, 0, true),
+          "height 0 never skips");
+    // A reorg from 100 back to 98: work at 98 and 99 is below the old highest
+    // height, so nothing is skipped until the chain passes 100.
+    check(!tari_miner::should_skip_stale(98, 100, 99, true) &&
+              !tari_miner::should_skip_stale(99, 100, 100, true),
+          "after a reorg nothing is skipped below the old highest height");
+    check(tari_miner::should_skip_stale(101, 101, 102, true),
+          "skipping resumes once the chain passes the old highest height");
+    const uint64_t huge = std::numeric_limits<uint64_t>::max();
+    check(!tari_miner::should_skip_stale(101, huge, 102, true),
+          "a single huge height turns skipping off rather than on");
+}
+
 int main() {
     test_wallet_validation();
     test_tari_address_charset();
@@ -511,6 +537,7 @@ int main() {
     test_reconnect_pause();
     test_superseded_job();
     test_height_churn_guard();
+    test_should_skip_stale();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");

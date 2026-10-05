@@ -247,10 +247,15 @@ public:
   }
 
   void add_edge(word_t u, word_t v) {
-    assert(u < MAXNODES);
-    assert(v < MAXNODES);
-    // reset() only clears ids the compressors handed out.
-    assert(!compressu || (u < compressu->nnodes && v < compressv->nnodes));
+    // reset() only clears ids the compressors handed out. An id outside them,
+    // or outside the graph, is an error; with asserts compiled out the edge is
+    // dropped and the next reset() clears in full.
+    if (u >= MAXNODES || v >= MAXNODES ||
+        (compressu && (u >= compressu->nnodes || v >= compressv->nnodes))) {
+      cleared = false;
+      assert(!"add_edge: node id out of range");
+      return;
+    }
     v += MAXNODES; // distinguish partitions
 #if GRAPH_UNION_SKIP
     bool maybeCycle = ufparent[u] != NIL && ufparent[v] != NIL && uf_find(u) == uf_find(v);

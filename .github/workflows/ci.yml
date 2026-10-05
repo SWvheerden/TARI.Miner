@@ -104,8 +104,9 @@ jobs:
 
       - name: Build and run cycle-finding graph regressions
         run: |
-          for skip in 0 1; do
-            g++ -std=c++17 -O2 -DGRAPH_UNION_SKIP=$skip \
+          for flags in -DGRAPH_UNION_SKIP=0 -DGRAPH_UNION_SKIP=1 \
+              "-DGRAPH_UNION_SKIP=1 -DNDEBUG"; do
+            g++ -std=c++17 -O2 $flags \
               -I. -Ithird_party/cuckoo/src/cuckaroo \
               tests/tari_graph_test.cpp \
               -o tests/tari_graph_test
@@ -181,6 +182,8 @@ jobs:
             'cl /nologo /std:c++17 /EHsc /O2 /DGRAPH_UNION_SKIP=0 /I. /Ithird_party\cuckoo\src\cuckaroo tests\tari_graph_test.cpp /Fe:tests\tari_graph_test.exe',
             'tests\tari_graph_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 /DGRAPH_UNION_SKIP=1 /I. /Ithird_party\cuckoo\src\cuckaroo tests\tari_graph_test.cpp /Fe:tests\tari_graph_test.exe',
+            'tests\tari_graph_test.exe',
+            'cl /nologo /std:c++17 /EHsc /O2 /DGRAPH_UNION_SKIP=1 /DNDEBUG /I. /Ithird_party\cuckoo\src\cuckaroo tests\tari_graph_test.cpp /Fe:tests\tari_graph_test.exe',
             'tests\tari_graph_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 tari_c29.cpp tari_c29_selftest.cpp /Fe:tari_c29_selftest.exe',
             'tari_c29_selftest.exe'

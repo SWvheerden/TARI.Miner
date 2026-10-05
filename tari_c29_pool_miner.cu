@@ -621,6 +621,8 @@ struct Options {
     int pipeline = 2;
     bool pipeline_set = false;
     int max_runtime_sec = 0;
+    // Skip the cycle search for graphs of a block the pool has moved past.
+    bool stale_skip = true;
     int ntrims = -1;
     int gena_blocks = -1;
     int gena_tpb = -1;
@@ -654,6 +656,7 @@ static void usage() {
            "  --device N              default 0\n"
            "  --pipeline N            solver contexts to overlap GPU trim and CPU cycle search, default auto\n"
            "  --max-runtime-sec N     stop after N seconds (test helper)\n"
+           "  --no-stale-skip         also search and submit work for a superseded block\n"
            "  --version               print version and exit\n"
            "tuning:\n"
            "  --ntrims N              even trim-round count, build default\n"
@@ -683,6 +686,7 @@ static bool parse_args(int argc, char **argv, Options &o) {
         else if (!strcmp(argv[i], "--intensity")) { char *v = need(argv[i]); if (!v) return false; o.intensity = atoi(v); }
         else if (!strcmp(argv[i], "--device")) { char *v = need(argv[i]); if (!v) return false; o.device = atoi(v); }
         else if (!strcmp(argv[i], "--pipeline")) { char *v = need(argv[i]); if (!v) return false; o.pipeline = atoi(v); o.pipeline_set = true; }
+        else if (!strcmp(argv[i], "--no-stale-skip")) { o.stale_skip = false; }
         else if (!strcmp(argv[i], "--max-runtime-sec")) { char *v = need(argv[i]); if (!v) return false; o.max_runtime_sec = atoi(v); }
         else if (!strcmp(argv[i], "--ntrims")) { char *v = need(argv[i]); if (!v) return false; o.ntrims = atoi(v); }
         else if (!strcmp(argv[i], "--gena-blocks")) { char *v = need(argv[i]); if (!v) return false; o.gena_blocks = atoi(v); }
@@ -840,6 +844,8 @@ int main(int argc, char **argv) {
     // Trimmed graphs not searched because the pool moved to a higher block.
     uint64_t stale_skipped = 0;
     tari_miner::HeightChurnGuard height_guard;
+    // Highest job height the main loop has seen, kept across reconnects.
+    uint64_t height_hwm = 0;
     int exit_code = 0;
     tari_miner::LoginFailurePolicy login_failures;
     tari_miner::PoolSilencePolicy pool_silence;
@@ -1099,6 +1105,8 @@ int main(int argc, char **argv) {
                 counter = ((uint64_t)(now_sec() * 1000000.0)) & mask;
             }
 
+            height_hwm = std::max(height_hwm, job.height);
+            uint64_t hwm_at_launch = height_hwm;
             uint64_t nonce = base | (counter++ & mask);
             inject_keys(ctx, nonce, job);
 
@@ -1109,9 +1117,13 @@ int main(int argc, char **argv) {
                 break;
             // Shares for a block the pool has moved past would be rejected
             // as stale, so skip the cycle search for them.
-            uint64_t latest_height = pool.current_job().height;
-            bool superseded = height_trusted(latest_height) &&
-                tari_miner::is_superseded(job.height, latest_height);
+            bool superseded = false;
+            if (opt.stale_skip) {
+                uint64_t latest_height = pool.current_job().height;
+                height_hwm = std::max(height_hwm, latest_height);
+                superseded = tari_miner::should_skip_stale(
+                    job.height, hwm_at_launch, latest_height, height_trusted(latest_height));
+            }
             if (superseded)
                 stale_skipped++;
             if (trim.nedges && !superseded) {
@@ -1133,6 +1145,7 @@ int main(int argc, char **argv) {
                 std::future<SolverTrimResult> future;
                 Job job;
                 uint64_t nonce = 0;
+                uint64_t hwm_at_launch = 0;
                 bool active = false;
             };
             std::vector<PendingTrim> pending((size_t)opt.pipeline);
@@ -1153,8 +1166,10 @@ int main(int argc, char **argv) {
                 uint64_t nonce = base | (counter++ & mask);
                 SolverCtx *slot_ctx = contexts[(size_t)slot];
                 inject_keys(slot_ctx, nonce, launch_job);
+                height_hwm = std::max(height_hwm, launch_job.height);
                 pending[(size_t)slot].job = launch_job;
                 pending[(size_t)slot].nonce = nonce;
+                pending[(size_t)slot].hwm_at_launch = height_hwm;
                 pending[(size_t)slot].active = true;
                 pending[(size_t)slot].future = workers[(size_t)slot]->submit([slot_ctx, device = opt.device]() {
                     return slot_ctx->trim_copy_checked(device);
@@ -1209,10 +1224,14 @@ int main(int argc, char **argv) {
                     break;
                 // A trim queued before the pool moved to a higher block is not
                 // worth a cycle search: its shares would be rejected as stale.
-                uint64_t latest_height = pool.current_job().height;
-                bool superseded = height_trusted(latest_height) &&
-                    tari_miner::is_superseded(pending[(size_t)slot].job.height,
-                                              latest_height);
+                bool superseded = false;
+                if (opt.stale_skip) {
+                    uint64_t latest_height = pool.current_job().height;
+                    height_hwm = std::max(height_hwm, latest_height);
+                    superseded = tari_miner::should_skip_stale(
+                        pending[(size_t)slot].job.height, pending[(size_t)slot].hwm_at_launch,
+                        latest_height, height_trusted(latest_height));
+                }
                 if (superseded)
                     stale_skipped++;
                 if (trim.nedges && !superseded) {
