@@ -323,8 +323,13 @@ private:
     SolverFailure failure_ = SolverFailure::None;
 };
 
-// A pool can send error lines without limit. Log at most this many of each
-// kind per window so a hostile pool cannot fill the log disk.
+// A pool can send errors, share rejections and jobs without limit. Log at most
+// this many of each kind per window, plus one "N more not logged" line when
+// the next message arrives in a later window (a count still pending when the
+// pool goes quiet is not printed). Each such line is under about 400 bytes
+// (pool text is capped at 256), so the three kinds add under 30 KB in
+// any 15 s, which keeps the latest speed report inside the last 1 MiB of the
+// log that hiveos/h-stats.sh reads and slows log growth to a trickle.
 constexpr unsigned POOL_LOG_LIMIT = 10;
 constexpr double POOL_LOG_WINDOW_SEC = 60.0;
 

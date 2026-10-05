@@ -562,11 +562,22 @@ private:
         bool invalid_target = false;
         if (parse_job_line(line, job_, parsed, &invalid_target)) {
             job_ = parsed;
-            std::string safe_job_id = tari_pool::sanitize_for_terminal(job_.job_id);
-            std::string safe_xn = tari_pool::sanitize_for_terminal(job_.xn_hex);
-            printf("new job height=%llu id=%s diff=%llu xn=%s\n",
-                   (unsigned long long)job_.height, safe_job_id.c_str(),
-                   (unsigned long long)job_.target_diff, safe_xn.c_str());
+            uint64_t suppressed = 0;
+            bool log = job_log_limit_.allow(now_sec(), suppressed);
+            if (suppressed)
+                printf("new job: %llu more not logged\n", (unsigned long long)suppressed);
+            if (log) {
+                std::string safe_job_id = tari_pool::sanitize_for_terminal(job_.job_id);
+                // nonce_prefix_base only uses an even-length hex xn of up to
+                // 8 bytes; anything else is not printed.
+                bool xn_ok = job_.xn_hex.size() % 2 == 0 && job_.xn_hex.size() <= 16;
+                for (char c : job_.xn_hex)
+                    if (hexval(c) < 0) xn_ok = false;
+                printf("new job height=%llu id=%s xn=%s diff=%llu\n",
+                       (unsigned long long)job_.height, safe_job_id.c_str(),
+                       xn_ok ? job_.xn_hex.c_str() : "<invalid>",
+                       (unsigned long long)job_.target_diff);
+            }
         } else if (invalid_target) {
             fprintf(stderr, "invalid pool target; disconnecting\n");
             protocol_error_.store(true);
@@ -589,6 +600,7 @@ private:
     // Only touched by the reader thread.
     tari_miner::LogRateLimiter reject_log_limit_;
     tari_miner::LogRateLimiter error_log_limit_;
+    tari_miner::LogRateLimiter job_log_limit_;
 };
 
 struct Options {

@@ -67,8 +67,19 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
         # field allowed after t= is stale=. Over-long numbers are ignored. A
         # report more than 90 s old, or more than 30 s in the future, means the
         # miner is not reporting, so the rate drops to 0. Only the last 1 MiB
-        # of the log is read, so a flooded log stays cheap to parse.
-        read -r rate gpu_accepted gpu_rejected < <(tail -c 1048576 "$log_file" | LC_ALL=C awk -v now="$now" '
+        # of the log is read, so a flooded log stays cheap to parse. When the
+        # log is bigger than that, reading starts mid-line, so the first line
+        # read is dropped: its tail could be pool text that looks like a report.
+        log_window=1048576
+        log_size="$(stat -c %s "$log_file" 2>/dev/null || echo 0)"
+        log_start=1
+        log_skip=0
+        if ((log_size > log_window)); then
+            log_start=$((log_size - log_window + 1))
+            log_skip=1
+        fi
+        read -r rate gpu_accepted gpu_rejected < <(tail -c "+$log_start" "$log_file" | LC_ALL=C awk -v now="$now" -v skip="$log_skip" '
+            NR == 1 && skip == 1 { next }
             /^speed [0-9]+\.[0-9]+ g\/s \| avg [0-9]+\.[0-9]+ g\/s \| graphs=[0-9]+ cycles=[0-9]+ submitted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ t=[0-9]+( stale=[0-9]+)?$/ {
                 a = substr($12, 10)
                 r = substr($13, 10)

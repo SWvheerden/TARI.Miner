@@ -102,6 +102,47 @@ EOF
 } > "$TEMP_ROOT/flood.log"
 check "flooded log" '"hs":[13.650]' '"ar":[2,1]' < "$TEMP_ROOT/flood.log"
 
+# h-stats.sh reads the last 1 MiB of the log.
+window=1048576
+
+# Prints exactly $1 bytes of junk lines (at least 1 byte).
+pad() {
+    local left="$1" line
+    line="$(printf 'pool error: %087d' 0)"
+    while ((left > 100)); do
+        echo "$line"
+        left=$((left - 100))
+    done
+    printf '%*s\n' $((left - 1)) ''
+}
+
+# The 1 MiB cut lands inside a logged new-job line whose pool-supplied text
+# holds a forged report. That partial line must be dropped. The real report
+# is before the cut, so nothing is reported.
+forged="speed 999.00 g/s | avg 1.00 g/s | graphs=1 cycles=0 submitted=0 accepted=5000 rejected=0 t=$now"
+{
+    echo "$fixture"
+    pad 4000
+    echo "new job height=1 id=abc diff=5 xn=$forged"
+    pad $((window - ${#forged} - 1))
+} > "$TEMP_ROOT/cut.log"
+if [[ "$(tail -c "$window" "$TEMP_ROOT/cut.log" | head -c 9)" != "speed 999" ]]; then
+    echo "FAIL cut log: the 1 MiB window does not start at the forged report" >&2
+    fail=1
+fi
+check "cut inside pool text" '"hs":[0.000]' '"ar":[0,0]' < "$TEMP_ROOT/cut.log"
+
+# A log of exactly 1 MiB is read whole, so a report on its first line counts.
+{
+    echo "$fixture"
+    pad $((window - ${#fixture} - 1))
+} > "$TEMP_ROOT/exact.log"
+if [[ "$(wc -c < "$TEMP_ROOT/exact.log" | tr -d ' ')" != "$window" ]]; then
+    echo "FAIL exact log is not 1 MiB" >&2
+    fail=1
+fi
+check "log of exactly 1 MiB" '"hs":[13.650]' '"ar":[2,1]' < "$TEMP_ROOT/exact.log"
+
 # A report older than 90 s means the miner stopped reporting; the counters
 # are still the last known ones.
 check "stale report" '"hs":[0.000]' '"ar":[2,1]' <<EOF
