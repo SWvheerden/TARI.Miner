@@ -326,10 +326,12 @@ private:
 // A pool can send errors, share rejections and jobs without limit. Log at most
 // this many of each kind per window, plus one "N more not logged" line when
 // the next message arrives in a later window (a count still pending when the
-// pool goes quiet is not printed). Each such line is under about 400 bytes
-// (pool text is capped at 256), so the three kinds add under 30 KB in
-// any 15 s, which keeps the latest speed report inside the last 1 MiB of the
-// log that hiveos/h-stats.sh reads and slows log growth to a trickle.
+// pool goes quiet is not printed). The limits live for the whole process, so
+// reconnecting does not reset them. Each such line is under about 400 bytes
+// (pool text is capped at 256), so the three kinds add under 30 KB in any
+// 15 s, across reconnects. That keeps the latest speed report inside the last
+// 1 MiB of the log that hiveos/h-stats.sh reads and slows log growth to a
+// trickle.
 constexpr unsigned POOL_LOG_LIMIT = 10;
 constexpr double POOL_LOG_WINDOW_SEC = 60.0;
 
@@ -364,5 +366,22 @@ private:
     unsigned logged_ = 0;
     uint64_t suppressed_ = 0;
 };
+
+struct PoolLogLimits {
+    LogRateLimiter error;
+    LogRateLimiter rejected;
+    LogRateLimiter job;
+};
+
+// A connection that ends cleanly sooner than this after it started is followed
+// by a pause, so a pool that closes the connection right after login cannot
+// make the miner reconnect (and log a new connection) in a tight loop. A
+// normal long-lived connection that drops still reconnects at once.
+constexpr double SHORT_CONNECTION_SEC = 15.0;
+constexpr unsigned SHORT_CONNECTION_PAUSE_SECONDS = 5;
+
+inline bool pause_before_reconnect(double connection_sec) {
+    return !(connection_sec >= SHORT_CONNECTION_SEC);
+}
 
 } // namespace tari_miner

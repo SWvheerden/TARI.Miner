@@ -404,6 +404,20 @@ static void test_log_rate_limiter() {
           "a clock going backwards starts a new window");
 }
 
+static void test_pause_before_reconnect() {
+    std::puts("Reconnect pause:");
+    check(tari_miner::pause_before_reconnect(0.2),
+          "a connection closed right after login pauses");
+    check(tari_miner::pause_before_reconnect(14.9),
+          "a short connection pauses");
+    check(!tari_miner::pause_before_reconnect(tari_miner::SHORT_CONNECTION_SEC),
+          "a connection that lasted the threshold reconnects at once");
+    check(!tari_miner::pause_before_reconnect(3600.0),
+          "a long connection reconnects at once");
+    check(tari_miner::pause_before_reconnect(-1.0),
+          "a clock going backwards pauses");
+}
+
 int main() {
     test_wallet_validation();
     test_tari_address_charset();
@@ -415,6 +429,7 @@ int main() {
     test_login_failure_policy();
     test_solver_watchdog();
     test_log_rate_limiter();
+    test_pause_before_reconnect();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");

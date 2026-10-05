@@ -336,6 +336,12 @@ static bool parse_job_line(
 
 class PoolClient {
 public:
+    // The log limits are shared by every connection, so a pool cannot reset
+    // them by reconnecting. Only one PoolClient is alive at a time and its
+    // destructor joins the reader thread, so they need no lock.
+    explicit PoolClient(tari_miner::PoolLogLimits &log_limits)
+        : log_limits_(log_limits) {}
+
     bool connect_login(const std::string &pool, const std::string &login, const std::string &pass) {
         std::string host, port;
         if (!split_host_port(pool, host, port)) {
@@ -529,7 +535,7 @@ private:
         if (response == tari_miner::PoolResponseKind::ShareRejected) {
             rejected_.fetch_add(1);
             uint64_t suppressed = 0;
-            bool log = reject_log_limit_.allow(now_sec(), suppressed);
+            bool log = log_limits_.rejected.allow(now_sec(), suppressed);
             if (suppressed)
                 printf("share rejected: %llu more not logged\n", (unsigned long long)suppressed);
             if (log) {
@@ -540,7 +546,7 @@ private:
         }
         if (response == tari_miner::PoolResponseKind::OtherError) {
             uint64_t suppressed = 0;
-            bool log = error_log_limit_.allow(now_sec(), suppressed);
+            bool log = log_limits_.error.allow(now_sec(), suppressed);
             if (suppressed)
                 printf("pool error: %llu more not logged\n", (unsigned long long)suppressed);
             if (log) {
@@ -563,7 +569,7 @@ private:
         if (parse_job_line(line, job_, parsed, &invalid_target)) {
             job_ = parsed;
             uint64_t suppressed = 0;
-            bool log = job_log_limit_.allow(now_sec(), suppressed);
+            bool log = log_limits_.job.allow(now_sec(), suppressed);
             if (suppressed)
                 printf("new job: %llu more not logged\n", (unsigned long long)suppressed);
             if (log) {
@@ -598,9 +604,7 @@ private:
     std::atomic<uint64_t> accepted_{0};
     std::atomic<uint64_t> rejected_{0};
     // Only touched by the reader thread.
-    tari_miner::LogRateLimiter reject_log_limit_;
-    tari_miner::LogRateLimiter error_log_limit_;
-    tari_miner::LogRateLimiter job_log_limit_;
+    tari_miner::PoolLogLimits &log_limits_;
 };
 
 struct Options {
@@ -842,6 +846,7 @@ int main(int argc, char **argv) {
     // Share counts from earlier connections. Each PoolClient counts from zero,
     // so these keep the reported totals from resetting on reconnect.
     uint64_t accepted_before = 0, rejected_before = 0;
+    tari_miner::PoolLogLimits pool_log_limits;
 
     // Prints the speed report when one is due. Also called in the waits between
     // reconnect attempts so the rolling rate falls during an outage. Nothing is
@@ -909,7 +914,8 @@ int main(int argc, char **argv) {
         std::string login = opt.wallet + opt.login_separator + opt.worker;
         printf("connecting to %s as %s\n", opt.pool.c_str(), login.c_str());
 
-        PoolClient pool;
+        double connected_at = now_sec();
+        PoolClient pool(pool_log_limits);
         if (!pool.connect_login(opt.pool, login, opt.pass)) {
             pool_silence.reset();
             protocol_errors.reset();
@@ -1210,6 +1216,13 @@ int main(int argc, char **argv) {
         // A connection that ends without malformed data also breaks the
         // protocol-error streak.
         protocol_errors.reset();
+        // A pool that keeps closing the connection soon after login must not
+        // make the miner reconnect in a tight loop.
+        bool out_of_time = opt.max_runtime_sec > 0 &&
+                           now_sec() - start >= opt.max_runtime_sec;
+        if (!out_of_time &&
+            tari_miner::pause_before_reconnect(now_sec() - connected_at))
+            reconnect_wait(tari_miner::SHORT_CONNECTION_PAUSE_SECONDS);
     }
 
     double elapsed = now_sec() - start;
