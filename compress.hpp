@@ -23,6 +23,9 @@ public:
   // bytes() layout.
   word_t *slots;
   bool sharedmem;
+  // NODE OVERFLOW events since construction (never reset), so a caller can
+  // tell whether one graph overflowed without parsing stderr.
+  size_t overflows = 0;
 
   compressor(u32 nodebits, u32 compressbits, char *bytes) {
     NODEBITS = nodebits;
@@ -87,6 +90,7 @@ public:
       if (cu == NIL) {
         if (nnodes >= SIZE) {
           fprintf(stderr, "NODE OVERFLOW at %x\n", u);
+          overflows++;
           return 0;
         }
         nodes[ui] = u << SIZEBITS | nnodes;

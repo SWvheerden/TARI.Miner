@@ -3,6 +3,7 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "../tari_miner_stats.h"
 
@@ -248,6 +249,89 @@ int main() {
             std::numeric_limits<double>::infinity(), 0, 0, 0, 0, 0, -5, 0
         )
     );
+
+    // Nearest-rank percentiles: rank ceil(p / 100 * n), at least 1.
+    {
+        const std::vector<int> empty;
+        expect_rate("nearest rank empty", 0.0, tari_miner::nearest_rank(empty, 50));
+        const std::vector<int> one = {7};
+        expect_rate("nearest rank one p0", 7.0, tari_miner::nearest_rank(one, 0));
+        expect_rate("nearest rank one p99", 7.0, tari_miner::nearest_rank(one, 99));
+        const std::vector<int> four = {1, 2, 3, 4};
+        expect_rate("nearest rank p50 of 4", 2.0, tari_miner::nearest_rank(four, 50));
+        expect_rate("nearest rank p51 of 4", 3.0, tari_miner::nearest_rank(four, 51));
+        expect_rate("nearest rank p99 of 4", 4.0, tari_miner::nearest_rank(four, 99));
+        expect_rate("nearest rank p100 of 4", 4.0, tari_miner::nearest_rank(four, 100));
+        expect_rate("nearest rank p200 clamps", 4.0, tari_miner::nearest_rank(four, 200));
+        std::vector<int> hundred;
+        for (int i = 1; i <= 100; i++)
+            hundred.push_back(i);
+        expect_rate("nearest rank p99 of 100", 99.0, tari_miner::nearest_rank(hundred, 99));
+        std::vector<int> big;
+        for (int i = 1; i <= 2000; i++)
+            big.push_back(i);
+        expect_rate("nearest rank p50 of 2000", 1000.0, tari_miner::nearest_rank(big, 50));
+        expect_rate("nearest rank p99 of 2000", 1980.0, tari_miner::nearest_rank(big, 99));
+    }
+
+    {
+        tari_miner::GraphCostStats empty_stats(1000);
+        const tari_miner::GraphCostSummary s = empty_stats.summarize(0.0);
+        expect_rate("no graphs edges max", 0.0, s.edges_max);
+        expect_rate("no graphs busy", 0.0, s.busy_fraction);
+        expect_line(
+            "no graphs json",
+            ",\"edges_min\":0,\"edges_p50\":0,\"edges_p99\":0,\"edges_max\":0"
+            ",\"findcycles_ms_p50\":0.000,\"findcycles_ms_p99\":0.000,\"findcycles_ms_max\":0.000"
+            ",\"findcycles_sec\":0.000,\"elapsed_sec\":0.000,\"busy_fraction\":0.000000"
+            ",\"oops_graphs\":0,\"node_overflow_graphs\":0",
+            tari_miner::format_graph_cost_json(s)
+        );
+    }
+
+    {
+        // Values arrive out of order; one graph is over the cap (OOPS) and
+        // one cycle search reports a NODE OVERFLOW.
+        tari_miner::GraphCostStats stats(1000);
+        stats.reserve(4);
+        const uint32_t edges[] = {500, 1001, 200, 800};
+        for (uint32_t e : edges)
+            stats.add_trim(e);
+        stats.add_findcycles(0.004, false);
+        stats.add_findcycles(0.001, false);
+        stats.add_findcycles(0.003, true);
+        stats.add_findcycles(-1.0, false);  // a clock step back counts as 0
+        const tari_miner::GraphCostSummary s = stats.summarize(0.05);
+        expect_rate("edges min", 200.0, s.edges_min);
+        expect_rate("edges p50", 500.0, s.edges_p50);
+        expect_rate("edges p99", 1001.0, s.edges_p99);
+        expect_rate("edges max", 1001.0, s.edges_max);
+        expect_rate("findcycles p50", 1.0, s.findcycles_ms_p50);
+        expect_rate("findcycles p99", 4.0, s.findcycles_ms_p99);
+        expect_rate("findcycles max", 4.0, s.findcycles_ms_max);
+        expect_rate("findcycles total", 0.008, s.findcycles_sec);
+        expect_rate("busy fraction", 0.16, s.busy_fraction);
+        expect_rate("oops graphs", 1.0, (double)s.oops_graphs);
+        expect_rate("node overflow graphs", 1.0, (double)s.node_overflow_graphs);
+        expect_line(
+            "graph cost lines",
+            "surviving edges: min=200 p50=500 p99=1001 max=1001  (per graph, before the MAXEDGES=1000 cap)\n"
+            "findcycles ms  : p50=1.000 p99=4.000 max=4.000  (main thread, per graph)\n"
+            "cpu busy       : fraction=0.1600  (findcycles 0.008 s / wall 0.050 s)\n"
+            "lost edges     : oops_graphs=1 node_overflow_graphs=1\n",
+            tari_miner::format_graph_cost_lines(s, 1000)
+        );
+        expect_line(
+            "graph cost json",
+            ",\"edges_min\":200,\"edges_p50\":500,\"edges_p99\":1001,\"edges_max\":1001"
+            ",\"findcycles_ms_p50\":1.000,\"findcycles_ms_p99\":4.000,\"findcycles_ms_max\":4.000"
+            ",\"findcycles_sec\":0.008,\"elapsed_sec\":0.050,\"busy_fraction\":0.160000"
+            ",\"oops_graphs\":1,\"node_overflow_graphs\":1",
+            tari_miner::format_graph_cost_json(s)
+        );
+        // Busy time can never exceed the wall time.
+        expect_rate("busy fraction clamps", 1.0, stats.summarize(0.001).busy_fraction);
+    }
 
     if (failures) {
         std::fprintf(stderr, "%d speed meter test(s) failed\n", failures);

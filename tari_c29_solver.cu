@@ -27,6 +27,7 @@
 
 #include "tari_miner_pipeline.h"
 #include "tari_miner_reliability.h"
+#include "tari_miner_stats.h"
 #include "tari_miner_worker.h"
 #include "version.h"
 
@@ -106,6 +107,11 @@ static int parse_hex32(const char *hex, uint8_t out[32]) {
         out[i] = (uint8_t)v;
     }
     return 0;
+}
+
+// NODE OVERFLOW events so far in a context's cycle-search compressors.
+static size_t node_overflows(const SolverCtx *ctx) {
+    return ctx->cg.compressu->overflows + ctx->cg.compressv->overflows;
 }
 
 static void report_cuda_failure(int device, int context, const char *phase, cudaError_t error) {
@@ -237,6 +243,9 @@ int main(int argc, char **argv) {
     );
 
     uint64_t graphs = 0, cycles = 0, shares = 0, bugs = 0;
+    // Per-graph surviving edges and cycle-search time, for the ntrims sweep.
+    tari_miner::GraphCostStats graph_costs(MAXEDGES);
+    graph_costs.reserve(count);
     int exit_code = 0;
     double t0 = 0.0;
     std::vector<SolverCtx*> extra_contexts;
@@ -307,6 +316,15 @@ int main(int argc, char **argv) {
         }
     };
 
+    // The cycle search runs on this (main) thread in both paths; time it here.
+    auto find_cycles = [&](SolverCtx *c, u32 nedges) {
+        const size_t overflows_before = node_overflows(c);
+        const double start = now_sec();
+        int rc = c->findcycles_copied_status(nedges);
+        graph_costs.add_findcycles(now_sec() - start, node_overflows(c) != overflows_before);
+        return rc;
+    };
+
     auto observe_trim = [&](tari_miner::SolverWatchdog &watchdog,
                             int context,
                             const SolverTrimResult &trim) {
@@ -331,12 +349,14 @@ int main(int argc, char **argv) {
         inject_keys(ctx, nonce);
 
         SolverTrimResult trim = ctx->trim_copy_checked(device);
-        if (trim.cuda_error == cudaSuccess)
+        if (trim.cuda_error == cudaSuccess) {
             graphs++;
+            graph_costs.add_trim(trim.uncapped_nedges);
+        }
         if (!observe_trim(watchdog, 0, trim))
             break;
         if (trim.nedges) {
-            int cycle_rc = ctx->findcycles_copied_status(trim.nedges);
+            int cycle_rc = find_cycles(ctx, trim.nedges);
             if (cycle_rc != cudaSuccess) {
                 report_cuda_failure(device, 0, "cycle recovery", (cudaError_t)cycle_rc);
                 exit_code = tari_miner::SOLVER_FAILURE_EXIT_CODE;
@@ -414,12 +434,14 @@ int main(int argc, char **argv) {
             SolverTrimResult trim = pending[(size_t)slot].future.get();
             pending[(size_t)slot].active = false;
 
-            if (trim.cuda_error == cudaSuccess)
+            if (trim.cuda_error == cudaSuccess) {
                 graphs++;
+                graph_costs.add_trim(trim.uncapped_nedges);
+            }
             if (!observe_trim(watchdogs[(size_t)slot], slot, trim))
                 break;
             if (trim.nedges) {
-                int cycle_rc = c->findcycles_copied_status(trim.nedges);
+                int cycle_rc = find_cycles(c, trim.nedges);
                 if (cycle_rc != cudaSuccess) {
                     report_cuda_failure(device, slot, "cycle recovery", (cudaError_t)cycle_rc);
                     exit_code = tari_miner::SOLVER_FAILURE_EXIT_CODE;
@@ -443,12 +465,15 @@ int main(int argc, char **argv) {
            (unsigned long long)cycles, graphs / 42.0);
     printf("verify failures: %llu  (MUST be 0)\n", (unsigned long long)bugs);
     printf("shares (>=%llu)  : %llu\n", (unsigned long long)target, (unsigned long long)shares);
+    const tari_miner::GraphCostSummary cost_summary = graph_costs.summarize(elapsed);
+    printf("%s", tari_miner::format_graph_cost_lines(cost_summary, MAXEDGES).c_str());
     if (recall.is_open()) {
         recall
             << "{\"type\":\"summary\",\"graphs\":"
             << (unsigned long long)graphs
             << ",\"cycles\":" << (unsigned long long)cycles
             << ",\"verify_failures\":" << (unsigned long long)bugs
+            << tari_miner::format_graph_cost_json(cost_summary)
             << "}\n";
         recall.flush();
         if (!recall) {
