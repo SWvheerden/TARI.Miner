@@ -844,8 +844,12 @@ int main(int argc, char **argv) {
     // Trimmed graphs not searched because the pool moved to a higher block.
     uint64_t stale_skipped = 0;
     tari_miner::HeightChurnGuard height_guard;
-    // Highest job height the main loop has seen, kept across reconnects.
+    // Highest job height the main loop has seen. Kept across reconnects:
+    // resetting it would let a pool dip the height for a launch and restore
+    // it before the graph finishes, since the guard does not see launch-time
+    // heights.
     uint64_t height_hwm = 0;
+    bool hwm_hold_logged = false;
     int exit_code = 0;
     tari_miner::LoginFailurePolicy login_failures;
     tari_miner::PoolSilencePolicy pool_silence;
@@ -1049,10 +1053,32 @@ int main(int argc, char **argv) {
             bool trusted = height_guard.observe(latest_height, now_sec(), warn);
             if (warn)
                 fprintf(stderr,
-                        "pool height changing too fast (%u increases in %.0fs); "
+                        "pool height changing too fast (more than %u increases in %.0fs); "
                         "not skipping stale work\n",
-                        height_guard.increases(), tari_miner::HEIGHT_CHURN_WINDOW_SEC);
+                        tari_miner::HEIGHT_CHURN_LIMIT, tari_miner::HEIGHT_CHURN_WINDOW_SEC);
             return trusted;
+        };
+
+        // Whether to skip the cycle search for work launched at work_height.
+        // Says once per run when only the high-water mark held the skip back,
+        // so a mark pinned by a reorg or a bogus height is visible.
+        auto skip_stale = [&](uint64_t work_height, uint64_t hwm_at_launch) -> bool {
+            if (!opt.stale_skip)
+                return false;
+            uint64_t latest_height = pool.current_job().height;
+            height_hwm = std::max(height_hwm, latest_height);
+            bool trusted = height_trusted(latest_height);
+            bool skip = tari_miner::should_skip_stale(
+                work_height, hwm_at_launch, latest_height, trusted);
+            if (!skip && trusted && !hwm_hold_logged &&
+                tari_miner::is_superseded(work_height, latest_height)) {
+                hwm_hold_logged = true;
+                fprintf(stderr,
+                        "stale skip paused: pool height %llu is below the highest seen "
+                        "height %llu (reorg, pool switch or bogus height); searching all work\n",
+                        (unsigned long long)work_height, (unsigned long long)hwm_at_launch);
+            }
+            return skip;
         };
 
         auto report_speed = [&]() {
@@ -1117,13 +1143,7 @@ int main(int argc, char **argv) {
                 break;
             // Shares for a block the pool has moved past would be rejected
             // as stale, so skip the cycle search for them.
-            bool superseded = false;
-            if (opt.stale_skip) {
-                uint64_t latest_height = pool.current_job().height;
-                height_hwm = std::max(height_hwm, latest_height);
-                superseded = tari_miner::should_skip_stale(
-                    job.height, hwm_at_launch, latest_height, height_trusted(latest_height));
-            }
+            bool superseded = skip_stale(job.height, hwm_at_launch);
             if (superseded)
                 stale_skipped++;
             if (trim.nedges && !superseded) {
@@ -1224,14 +1244,8 @@ int main(int argc, char **argv) {
                     break;
                 // A trim queued before the pool moved to a higher block is not
                 // worth a cycle search: its shares would be rejected as stale.
-                bool superseded = false;
-                if (opt.stale_skip) {
-                    uint64_t latest_height = pool.current_job().height;
-                    height_hwm = std::max(height_hwm, latest_height);
-                    superseded = tari_miner::should_skip_stale(
-                        pending[(size_t)slot].job.height, pending[(size_t)slot].hwm_at_launch,
-                        latest_height, height_trusted(latest_height));
-                }
+                bool superseded = skip_stale(pending[(size_t)slot].job.height,
+                                             pending[(size_t)slot].hwm_at_launch);
                 if (superseded)
                     stale_skipped++;
                 if (trim.nedges && !superseded) {

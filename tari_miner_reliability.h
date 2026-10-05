@@ -406,49 +406,70 @@ inline bool is_superseded(uint64_t work_height, uint64_t latest_height) {
 }
 
 // Real blocks arrive tens of seconds apart. More height increases than this
-// in one window means the pool's heights cannot be trusted to skip work.
+// in any window means the pool's heights cannot be trusted to skip work.
 constexpr unsigned HEIGHT_CHURN_LIMIT = 3;
 constexpr double HEIGHT_CHURN_WINDOW_SEC = 60.0;
 
-// Counts increases in the pool's job height. A pool (or anything in between)
+// Watches increases in the pool's job height. A pool (or anything in between)
 // that raises the height faster than blocks arrive could otherwise make every
-// graph look superseded, so no share would ever be sent. Holds no clock: the
+// graph look superseded, so no share would ever be sent. At most
+// HEIGHT_CHURN_LIMIT trusted increases fit in any HEIGHT_CHURN_WINDOW_SEC
+// span (a sliding window). One more trips the guard: heights stay untrusted
+// until a window has passed with no further increase. Holds no clock: the
 // caller passes the time in. Use from one thread only.
 class HeightChurnGuard {
 public:
     // Call with the latest job height whenever it is read. Returns true when
-    // a height increase may be used to skip stale work. Past the limit it
-    // returns false for the rest of the window, and sets warn once then.
+    // a height increase may be used to skip stale work. While tripped it
+    // returns false, and sets warn at most once per window.
     bool observe(uint64_t height, double t_sec, bool &warn) {
         warn = false;
-        if (!started_ || t_sec - window_start_ >= HEIGHT_CHURN_WINDOW_SEC ||
-            t_sec < window_start_) {
-            started_ = true;
-            window_start_ = t_sec;
-            increases_ = 0;
+        if (t_sec < last_time_) {
+            // The clock went backwards: the stored times mean nothing now.
+            count_ = 0;
+            next_ = 0;
+            tripped_ = false;
             warned_ = false;
         }
-        if (last_height_ != 0 && height > last_height_)
-            increases_++;
+        last_time_ = t_sec;
+        bool increase = last_height_ != 0 && height > last_height_;
         if (height != 0)
             last_height_ = height;
-        if (increases_ <= HEIGHT_CHURN_LIMIT)
+        if (increase) {
+            // times_[next_] is the oldest of the last HEIGHT_CHURN_LIMIT
+            // trusted increases once the ring is full.
+            bool full = count_ == HEIGHT_CHURN_LIMIT &&
+                        t_sec - times_[next_] < HEIGHT_CHURN_WINDOW_SEC;
+            if (full || (tripped_ && t_sec < untrusted_until_)) {
+                tripped_ = true;
+                untrusted_until_ = t_sec + HEIGHT_CHURN_WINDOW_SEC;
+            } else {
+                times_[next_] = t_sec;
+                next_ = (next_ + 1) % HEIGHT_CHURN_LIMIT;
+                if (count_ < HEIGHT_CHURN_LIMIT)
+                    count_++;
+            }
+        }
+        if (!tripped_ || t_sec >= untrusted_until_)
             return true;
-        if (!warned_) {
+        if (!warned_ || t_sec - last_warn_ >= HEIGHT_CHURN_WINDOW_SEC) {
             warned_ = true;
+            last_warn_ = t_sec;
             warn = true;
         }
         return false;
     }
 
-    unsigned increases() const { return increases_; }
-
 private:
-    bool started_ = false;
-    double window_start_ = 0.0;
-    uint64_t last_height_ = 0;
-    unsigned increases_ = 0;
+    double times_[HEIGHT_CHURN_LIMIT] = {};
+    unsigned count_ = 0;
+    unsigned next_ = 0;
+    bool tripped_ = false;
+    double untrusted_until_ = 0.0;
     bool warned_ = false;
+    double last_warn_ = 0.0;
+    double last_time_ = 0.0;
+    uint64_t last_height_ = 0;
 };
 
 // Whether to skip the cycle search for work launched at work_height.
@@ -457,7 +478,8 @@ private:
 // that high-water mark (the pool dipped and may restore the height before the
 // work finishes) is never skipped, so skipping always needs a new highest
 // height. Each one can skip at most the pipeline's queued graphs, and the
-// guard allows at most HEIGHT_CHURN_LIMIT of them per window. After a reorg to
+// guard trusts at most HEIGHT_CHURN_LIMIT increases in any
+// HEIGHT_CHURN_WINDOW_SEC span. After a reorg to
 // a lower height nothing is skipped until the chain passes the old highest
 // height again.
 inline bool should_skip_stale(uint64_t work_height, uint64_t hwm_at_launch,

@@ -446,16 +446,17 @@ static void test_superseded_job() {
 static void test_height_churn_guard() {
     std::puts("Height churn guard:");
     bool warn = false;
-    {
-        // One block every 30 s, for ten minutes.
+    for (double gap : {30.0, 120.0}) {
+        // One block every gap seconds, for an hour.
         tari_miner::HeightChurnGuard guard;
         bool trusted = true;
         bool warned = false;
-        for (int i = 0; i <= 20; ++i) {
-            trusted = trusted && guard.observe(1000 + i, 30.0 * i, warn);
+        for (int i = 0; i * gap <= 3600.0; ++i) {
+            trusted = trusted && guard.observe(1000 + i, gap * i, warn);
             warned = warned || warn;
         }
-        check(trusted && !warned, "a normal block cadence is trusted");
+        check(trusted && !warned, gap < 60.0 ? "a 30 s block cadence is trusted"
+                                             : "a 120 s block cadence is trusted");
     }
     {
         tari_miner::HeightChurnGuard guard;
@@ -469,19 +470,36 @@ static void test_height_churn_guard() {
               "one more increase in the window is not trusted, with a warning");
         check(!guard.observe(105, 5.0, warn) && !warn,
               "later increases stay untrusted, with no second warning");
-        check(!guard.observe(105, 59.0, warn) && !warn,
-              "the rest of the window stays untrusted");
-        check(guard.observe(106, 60.0, warn) && !warn,
-              "a new window is trusted again");
+        check(!guard.observe(105, 63.0, warn) && !warn,
+              "it stays untrusted until a window passes with no increase");
+        check(guard.observe(105, 65.0, warn) && !warn,
+              "it is trusted again once a window has passed");
+        check(guard.observe(106, 66.0, warn), "the next increase is trusted");
 
-        bool warned = false;
-        for (int i = 0; i < 10; ++i) {
-            guard.observe(200 + i, 61.0 + i, warn);
-            warned = warned || warn;
-        }
-        check(warned, "churn in the next window warns again");
+        trusted = guard.observe(107, 67.0, warn) && guard.observe(108, 68.0, warn);
+        check(trusted, "increases up to the limit are trusted again");
+        check(!guard.observe(109, 69.0, warn) && warn,
+              "churn a window after the last warning warns again");
+        bool any_trusted = false;
+        for (int i = 1; i <= 15; ++i)
+            any_trusted = guard.observe(109 + i, 69.0 + 10.0 * i, warn) || any_trusted;
+        check(!any_trusted, "sustained churn stays untrusted without flapping");
         check(guard.observe(300, 30.0, warn),
-              "time going backwards starts a new window");
+              "time going backwards starts again, trusted");
+    }
+    {
+        // Three increases just before t=60 and three just after: a fixed
+        // window starting at 0 would trust all six.
+        tari_miner::HeightChurnGuard guard;
+        guard.observe(100, 0.0, warn);
+        bool trusted = guard.observe(101, 58.5, warn) &&
+                       guard.observe(102, 59.0, warn) &&
+                       guard.observe(103, 59.5, warn);
+        check(trusted, "three increases in a burst are trusted");
+        bool after = guard.observe(104, 60.5, warn) ||
+                     guard.observe(105, 61.0, warn) ||
+                     guard.observe(106, 61.5, warn);
+        check(!after, "a burst across a minute boundary is not trusted");
     }
     {
         tari_miner::HeightChurnGuard guard;
