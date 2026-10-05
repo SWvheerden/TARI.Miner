@@ -34,9 +34,11 @@ To select device indexes, add this token to Extra config arguments:
 
   TARI_DEVICES=0,2
 
-The integration writes one log per GPU and reports per-GPU graph rates
-(averaged over about the last 60 seconds), temperatures, fans, accepted
-shares, and rejected shares to the HiveOS agent.
+The integration writes one log per GPU and reports per-GPU graph rates,
+temperatures, fans, accepted shares, and rejected shares to the HiveOS agent.
+The graph rate is averaged over about the last 60 seconds (earlier versions
+showed the average since start), so it drops while the pool is unreachable.
+A GPU whose log has had no speed report for 90 seconds shows 0.
 It does not change clocks, voltage, fans, or power limits.
 
 Manual reinstall on a rig

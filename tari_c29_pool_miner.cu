@@ -15,6 +15,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <algorithm>
 #include <future>
 #include <memory>
@@ -811,6 +812,39 @@ int main(int argc, char **argv) {
     // Outside the reconnect loop so a disconnected period shows as a lower
     // rolling rate instead of being forgotten.
     tari_miner::SpeedMeter speed_meter;
+    // Share counts from earlier connections. Each PoolClient counts from zero,
+    // so these keep the reported totals from resetting on reconnect.
+    uint64_t accepted_before = 0, rejected_before = 0;
+
+    // Prints the speed report when one is due. Also called while disconnected
+    // so the rolling rate falls during an outage instead of going quiet.
+    auto report_speed_with = [&](uint64_t accepted, uint64_t rejected) {
+        double t = now_sec();
+        if (t - last_report < tari_miner::SPEED_REPORT_INTERVAL_SEC)
+            return;
+        speed_meter.sample(t, graphs);
+        double lifetime = tari_miner::average_rate(graphs, t - start);
+        // The first report has no earlier sample to measure from.
+        double rolling = speed_meter.size() < 2
+            ? lifetime
+            : speed_meter.rolling_rate(tari_miner::SPEED_WINDOW_SEC);
+        printf("%s\n", tari_miner::format_speed_line(
+            rolling, lifetime, graphs, cycles, submitted, accepted, rejected,
+            (int64_t)std::time(nullptr)).c_str());
+        last_report = t;
+    };
+
+    // Sleeps between connection attempts, still printing speed reports.
+    auto reconnect_wait = [&](double seconds) {
+        double deadline = now_sec() + seconds;
+        while (true) {
+            report_speed_with(accepted_before, rejected_before);
+            double remaining = deadline - now_sec();
+            if (remaining <= 0.0) break;
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(std::min(remaining, 1.0)));
+        }
+    };
 
     auto observe_trim = [&](int context, const SolverTrimResult &trim) {
         tari_miner::SolverWatchdog &watchdog = solver_watchdogs[(size_t)context];
@@ -852,7 +886,7 @@ int main(int argc, char **argv) {
             pool_silence.reset();
             protocol_errors.reset();
             fprintf(stderr, "pool connection/login send failed; retrying in 5s\n");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            reconnect_wait(5);
             continue;
         }
 
@@ -877,8 +911,7 @@ int main(int argc, char **argv) {
                         "pool login rejected (%u/%u); retrying in 5s\n",
                         login_failures.consecutive_failures(),
                         tari_miner::MAX_LOGIN_FAILURES);
-                std::this_thread::sleep_for(
-                    std::chrono::seconds(tari_miner::LOGIN_RETRY_SECONDS));
+                reconnect_wait(tari_miner::LOGIN_RETRY_SECONDS);
                 continue;
             }
             pool.stop();
@@ -900,20 +933,20 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "no job received (%u/%u); reconnecting in %us\n",
                         pool_silence.consecutive_silences(),
                         tari_miner::MAX_SILENT_CYCLES, backoff);
-                std::this_thread::sleep_for(std::chrono::seconds(backoff));
+                reconnect_wait(backoff);
                 continue;
             }
             pool_silence.reset();
             if (wait_outcome == tari_miner::JobWaitOutcome::ProtocolError) {
                 if (record_protocol_error())
                     break;
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                reconnect_wait(5);
                 continue;
             }
             protocol_errors.reset();
             fprintf(stderr,
                     "pool disconnected before the first valid job; retrying in 5s\n");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            reconnect_wait(5);
             continue;
         }
         login_failures.record_success();
@@ -962,19 +995,8 @@ int main(int argc, char **argv) {
         };
 
         auto report_speed = [&]() {
-            double t = now_sec();
-            if (t - last_report >= tari_miner::SPEED_REPORT_INTERVAL_SEC) {
-                speed_meter.sample(t, graphs);
-                double lifetime = tari_miner::average_rate(graphs, t - start);
-                // The first report has no earlier sample to measure from.
-                double rolling = speed_meter.size() < 2
-                    ? lifetime
-                    : speed_meter.rolling_rate(tari_miner::SPEED_WINDOW_SEC);
-                printf("%s\n", tari_miner::format_speed_line(
-                    rolling, lifetime, graphs, cycles, submitted,
-                    pool.accepted(), pool.rejected()).c_str());
-                last_report = t;
-            }
+            report_speed_with(accepted_before + pool.accepted(),
+                              rejected_before + pool.rejected());
         };
 
         // Duty-cycle throttle. Sleeps in proportion to the time worked since the
@@ -1141,6 +1163,8 @@ int main(int argc, char **argv) {
             }
             drain_pending();
         }
+        accepted_before += pool.accepted();
+        rejected_before += pool.rejected();
         if (exit_code)
             break;
         if (pool.protocol_error()) {
@@ -1152,7 +1176,7 @@ int main(int argc, char **argv) {
             protocol_errors.record_valid_job(pool.current_job().seq);
             if (record_protocol_error())
                 break;
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            reconnect_wait(5);
             continue;
         }
         // A connection that ends without malformed data also breaks the

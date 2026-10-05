@@ -83,8 +83,9 @@ inline double average_rate(uint64_t graphs, double elapsed_sec) {
     return std::isfinite(rate) ? rate : 0.0;
 }
 
-// The periodic report line, without the trailing newline. hiveos/h-stats.sh
-// reads the number after "speed" and the accepted=/rejected= counters.
+// The periodic report line, without the trailing newline. unix_time is the
+// wall-clock time of the report, so hiveos/h-stats.sh can tell a fresh line
+// from an old one. h-stats.sh only accepts a line in exactly this format.
 inline std::string format_speed_line(
     double rolling,
     double lifetime,
@@ -92,18 +93,20 @@ inline std::string format_speed_line(
     uint64_t cycles,
     uint64_t submitted,
     uint64_t accepted,
-    uint64_t rejected
+    uint64_t rejected,
+    int64_t unix_time
 ) {
     if (!std::isfinite(rolling) || rolling < 0.0) rolling = 0.0;
     if (!std::isfinite(lifetime) || lifetime < 0.0) lifetime = 0.0;
+    if (unix_time < 0) unix_time = 0;
     char line[256];
     std::snprintf(
         line, sizeof(line),
         "speed %.2f g/s | avg %.2f g/s | graphs=%llu cycles=%llu submitted=%llu "
-        "accepted=%llu rejected=%llu",
+        "accepted=%llu rejected=%llu t=%lld",
         rolling, lifetime, (unsigned long long)graphs, (unsigned long long)cycles,
         (unsigned long long)submitted, (unsigned long long)accepted,
-        (unsigned long long)rejected
+        (unsigned long long)rejected, (long long)unix_time
     );
     return line;
 }

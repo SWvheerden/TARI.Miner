@@ -60,15 +60,25 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
     gpu_accepted=0
     gpu_rejected=0
     if [[ -f "$log_file" && $((now - $(stat -c %Y "$log_file" 2>/dev/null || echo 0))) -le 180 ]]; then
-        read -r rate gpu_accepted gpu_rejected < <(awk '
-            /speed [0-9.]+ g\/s/ {
-                for (i = 1; i <= NF; i++) {
-                    if ($i == "speed") rate = $(i + 1)
-                    if ($i ~ /^accepted=/) { split($i, v, "="); accepted = v[2] }
-                    if ($i ~ /^rejected=/) { split($i, v, "="); rejected = v[2] }
-                }
+        # Only a whole line in the miner's own report format counts. Pool text
+        # is always logged after a prefix such as "pool error:", so it cannot
+        # forge one. Over-long numbers are ignored, and a report older than
+        # 90 s means the miner has stopped reporting, so the rate drops to 0.
+        read -r rate gpu_accepted gpu_rejected < <(LC_ALL=C awk -v now="$now" '
+            /^speed [0-9]+\.[0-9]+ g\/s \| avg [0-9]+\.[0-9]+ g\/s \| graphs=[0-9]+ cycles=[0-9]+ submitted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ t=[0-9]+$/ {
+                a = substr($12, 10)
+                r = substr($13, 10)
+                t = substr($14, 3)
+                if (length($2) > 12 || length(a) > 15 || length(r) > 15 || length(t) > 12) next
+                rate = $2
+                accepted = a
+                rejected = r
+                seen = t
             }
-            END { printf "%.3f %d %d\n", rate + 0, accepted + 0, rejected + 0 }
+            END {
+                if (seen == "" || now - seen > 90) rate = 0
+                printf "%.3f %.0f %.0f\n", rate + 0, accepted + 0, rejected + 0
+            }
         ' "$log_file")
     fi
 

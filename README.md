@@ -70,8 +70,11 @@ alongside it. The two streams are separate files on Windows; the Linux starter
 combines them into one.
 
 In the speed report, `speed` is the graph rate over about the last 60
-seconds and `avg` is the average since the miner started. The rolling rate
-shows changes quickly, including time lost to reconnects.
+seconds and `avg` is the average since the miner started. The report keeps
+coming every 15 seconds while the miner reconnects, so time lost to a pool
+outage shows as a falling rate. `accepted` and `rejected` count shares since
+the miner started, across reconnects, and `t` is the report time in Unix
+seconds.
 
 Pools that expect `wallet/worker` rather than `wallet.worker` need the login
 separator set alongside the pool:
