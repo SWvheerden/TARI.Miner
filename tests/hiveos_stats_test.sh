@@ -77,11 +77,17 @@ check "trailing field" '"hs":[13.650]' '"ar":[2,1]' <<EOF
 $fixture stale=0
 EOF
 
-# Any other trailing field is rejected, such as the tail of a split
-# "new job ... diff=<n> xn=<hex>" line.
+# Any other trailing field is rejected, such as diff= or xn= text from the
+# tail of a split pool-text line.
 check "unknown trailing fields" '"hs":[0.000]' '"ar":[0,0]' <<EOF
 $fixture diff=5 xn=0123
 EOF
+
+# A report cut off mid-write (the log read while the line is being written)
+# must not hide the fresh report before it.
+check "half-written last line" '"hs":[13.650]' '"ar":[2,1]' < <(
+    printf '%s\n%s' "$fixture" "${fixture% t=*} t=17"
+)
 
 # A report far in the future (clock stepped back, or forged) is not fresh.
 check "future report" '"hs":[0.000]' '"ar":[2,1]' <<EOF
@@ -154,6 +160,23 @@ EOF
 check "forged only" '"hs":[0.000]' '"ar":[0,0]' <<EOF
 pool error: {"id":999,"error":"speed 50 g/s accepted=7 rejected=0"}
 EOF
+
+# h-stats.sh relies on pool text never starting a log line. The miner
+# prints pool text only at these call sites, each after a fixed prefix. A new
+# sanitize_for_terminal call must be checked the same way and added here.
+miner="$ROOT/tari_c29_pool_miner.cu"
+sites="$(grep -c 'sanitize_for_terminal(' "$miner" || true)"
+if [[ "$sites" != 4 ]]; then
+    echo "FAIL expected 4 pool text log sites in tari_c29_pool_miner.cu, found $sites" >&2
+    fail=1
+fi
+for prefix in '"pool login rejected: %s\n"' '"share rejected: %s\n"' \
+        '"pool error: %s\n"' '"new job height=%llu id=%s xn=%s diff=%llu\n"'; do
+    if ! grep -qF "$prefix" "$miner"; then
+        echo "FAIL pool text log format $prefix not found" >&2
+        fail=1
+    fi
+done
 
 if ((fail)); then
     exit 1

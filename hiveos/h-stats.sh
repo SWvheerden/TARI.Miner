@@ -65,8 +65,9 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
         # such as "pool error:" and caps it well below the stdio buffer size, so
         # pool text should never be written as a line of its own. The only
         # field allowed after t= is stale=. Over-long numbers are ignored. A
-        # report more than 90 s old, or more than 30 s in the future, means the
-        # miner is not reporting, so the rate drops to 0. Only the last 1 MiB
+        # report more than 90 s old, or more than 30 s in the future, does not
+        # set the rate; with no fresh report the rate is 0, while accepted and
+        # rejected come from the newest report line. Only the last 1 MiB
         # of the log is read, so a flooded log stays cheap to parse. When the
         # log is bigger than that, reading starts mid-line, so the first line
         # read is dropped: its tail could be pool text that looks like a report.
@@ -85,13 +86,17 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
                 r = substr($13, 10)
                 t = substr($14, 3)
                 if (length($2) > 12 || length(a) > 15 || length(r) > 15 || length(t) > 12) next
-                rate = $2
                 accepted = a
                 rejected = r
-                seen = t
+                # Only a fresh line sets the rate, so a stale line, or a line
+                # cut off mid-write (t=17...), cannot hide the latest report.
+                if (now - t <= 90 && t - now <= 30) {
+                    rate = $2
+                    fresh = 1
+                }
             }
             END {
-                if (seen == "" || now - seen > 90 || seen - now > 30) rate = 0
+                if (!fresh) rate = 0
                 printf "%.3f %.0f %.0f\n", rate + 0, accepted + 0, rejected + 0
             }
         ')

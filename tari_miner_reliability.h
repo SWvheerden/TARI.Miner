@@ -328,10 +328,11 @@ private:
 // the next message arrives in a later window (a count still pending when the
 // pool goes quiet is not printed). The limits live for the whole process, so
 // reconnecting does not reset them. Each such line is under about 400 bytes
-// (pool text is capped at 256), so the three kinds add under 30 KB in any
-// 15 s, across reconnects. That keeps the latest speed report inside the last
-// 1 MiB of the log that hiveos/h-stats.sh reads and slows log growth to a
-// trickle.
+// (pool text is capped at 256), so each kind adds at most about 4.5 KB per
+// minute, and the three together under 30 KB in any 15 s, across reconnects.
+// That keeps the latest speed report inside the last 1 MiB of the log that
+// hiveos/h-stats.sh reads. It bounds the rate, not the total: the logs still
+// grow over days and are not rotated.
 constexpr unsigned POOL_LOG_LIMIT = 10;
 constexpr double POOL_LOG_WINDOW_SEC = 60.0;
 
@@ -374,14 +375,21 @@ struct PoolLogLimits {
 };
 
 // A connection that ends cleanly sooner than this after it started is followed
-// by a pause, so a pool that closes the connection right after login cannot
-// make the miner reconnect (and log a new connection) in a tight loop. A
-// normal long-lived connection that drops still reconnects at once.
+// by a pause for the rest of this time, so a pool that closes the connection
+// right after login cannot make the miner reconnect (and log a new connection)
+// more than once per SHORT_CONNECTION_SEC, and a connection that lasted almost
+// that long costs almost no wait. A normal long-lived connection that drops
+// still reconnects at once.
 constexpr double SHORT_CONNECTION_SEC = 15.0;
-constexpr unsigned SHORT_CONNECTION_PAUSE_SECONDS = 5;
 
-inline bool pause_before_reconnect(double connection_sec) {
-    return !(connection_sec >= SHORT_CONNECTION_SEC);
+// Seconds to wait before reconnecting after a connection that lasted
+// connection_sec. A negative or unknown duration waits the full time.
+inline double reconnect_pause_seconds(double connection_sec) {
+    if (!(connection_sec >= 0.0))
+        return SHORT_CONNECTION_SEC;
+    if (connection_sec >= SHORT_CONNECTION_SEC)
+        return 0.0;
+    return SHORT_CONNECTION_SEC - connection_sec;
 }
 
 } // namespace tari_miner

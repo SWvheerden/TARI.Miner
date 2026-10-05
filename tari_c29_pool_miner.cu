@@ -15,6 +15,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <ctime>
 #include <algorithm>
 #include <future>
@@ -743,6 +744,9 @@ int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
 #else
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    // A send on a socket the pool has reset must fail with an error that the
+    // submit path handles, not kill the miner with SIGPIPE.
+    signal(SIGPIPE, SIG_IGN);
 #endif
 
     Options opt;
@@ -1220,9 +1224,9 @@ int main(int argc, char **argv) {
         // make the miner reconnect in a tight loop.
         bool out_of_time = opt.max_runtime_sec > 0 &&
                            now_sec() - start >= opt.max_runtime_sec;
-        if (!out_of_time &&
-            tari_miner::pause_before_reconnect(now_sec() - connected_at))
-            reconnect_wait(tari_miner::SHORT_CONNECTION_PAUSE_SECONDS);
+        double pause = tari_miner::reconnect_pause_seconds(now_sec() - connected_at);
+        if (!out_of_time && pause > 0.0)
+            reconnect_wait(pause);
     }
 
     double elapsed = now_sec() - start;

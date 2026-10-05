@@ -4,6 +4,7 @@
 #include "../tari_miner_reliability.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 
 static int failures = 0;
@@ -404,18 +405,26 @@ static void test_log_rate_limiter() {
           "a clock going backwards starts a new window");
 }
 
-static void test_pause_before_reconnect() {
+static bool near(double actual, double expected) {
+    return actual > expected - 1e-9 && actual < expected + 1e-9;
+}
+
+static void test_reconnect_pause() {
     std::puts("Reconnect pause:");
-    check(tari_miner::pause_before_reconnect(0.2),
-          "a connection closed right after login pauses");
-    check(tari_miner::pause_before_reconnect(14.9),
-          "a short connection pauses");
-    check(!tari_miner::pause_before_reconnect(tari_miner::SHORT_CONNECTION_SEC),
-          "a connection that lasted the threshold reconnects at once");
-    check(!tari_miner::pause_before_reconnect(3600.0),
+    check(near(tari_miner::reconnect_pause_seconds(0.2), 14.8),
+          "a connection closed right after login waits out the window");
+    check(near(tari_miner::reconnect_pause_seconds(14.9), 0.1),
+          "a connection that almost lasted the window barely waits");
+    check(tari_miner::reconnect_pause_seconds(tari_miner::SHORT_CONNECTION_SEC) == 0.0,
+          "a connection that lasted the window reconnects at once");
+    check(tari_miner::reconnect_pause_seconds(3600.0) == 0.0,
           "a long connection reconnects at once");
-    check(tari_miner::pause_before_reconnect(-1.0),
-          "a clock going backwards pauses");
+    check(tari_miner::reconnect_pause_seconds(-1.0) == tari_miner::SHORT_CONNECTION_SEC,
+          "a clock going backwards waits the full window");
+    check(tari_miner::reconnect_pause_seconds(
+              std::numeric_limits<double>::quiet_NaN()) ==
+              tari_miner::SHORT_CONNECTION_SEC,
+          "an unknown duration waits the full window");
 }
 
 int main() {
@@ -429,7 +438,7 @@ int main() {
     test_login_failure_policy();
     test_solver_watchdog();
     test_log_rate_limiter();
-    test_pause_before_reconnect();
+    test_reconnect_pause();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");
