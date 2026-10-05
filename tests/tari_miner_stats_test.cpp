@@ -45,6 +45,41 @@ int main() {
     }
 
     {
+        // The pool miner samples on the first graph after 15 s, so samples are
+        // a little more than 15 s apart. The window must still span four
+        // intervals, not three. Each interval has a different graph count, so
+        // a span of the wrong length gives a wrong rate.
+        const double steps[] = {15.05, 15.3};
+        for (double step : steps) {
+            tari_miner::SpeedMeter meter;
+            uint64_t graphs = 0;
+            for (int i = 0; i <= 10; i++) {
+                graphs += (uint64_t)(100 * i);
+                meter.sample(step * i, graphs);
+            }
+            // Newest is i = 10; four intervals back is i = 6.
+            const double expected = (700.0 + 800.0 + 900.0 + 1000.0) / (4 * step);
+            expect_rate("jittered spacing spans four intervals", expected,
+                        meter.rolling_rate(window));
+        }
+    }
+
+    {
+        // Uneven steps: the newest sample at least 60 s old is used.
+        tari_miner::SpeedMeter meter;
+        meter.sample(0.0, 0);
+        meter.sample(15.2, 100);
+        meter.sample(31.0, 300);
+        meter.sample(46.1, 600);
+        meter.sample(61.9, 1000);
+        meter.sample(77.0, 1500);
+        meter.sample(92.4, 2100);
+        // 92.4 - 31.0 = 61.4 >= 60, while 92.4 - 46.1 = 46.3 is too young.
+        expect_rate("uneven spacing", (2100.0 - 300.0) / (92.4 - 31.0),
+                    meter.rolling_rate(window));
+    }
+
+    {
         // Before a full window, the rate is over the samples available.
         tari_miner::SpeedMeter meter;
         meter.sample(15.0, 100);

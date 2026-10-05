@@ -35,7 +35,7 @@ To select device indexes, add this token to Extra config arguments:
   TARI_DEVICES=0,2
 
 The integration writes one log per GPU and reports per-GPU graph rates
-(averaged over the last 60 seconds), temperatures, fans, accepted shares, and
+(averaged over about the last 60 seconds), temperatures, fans, accepted shares, and
 rejected shares to the HiveOS agent.
 It does not change clocks, voltage, fans, or power limits.
 

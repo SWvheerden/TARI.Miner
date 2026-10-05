@@ -41,21 +41,23 @@ public:
             count_++;
     }
 
-    // Rate between the newest sample and the oldest sample no more than
-    // window_sec older than it. Before a full window exists this is the rate
-    // over the samples available. If no older sample is inside the window (a
-    // long gap between samples), the previous sample is used, so a gap with no
-    // graphs shows as a low rate. Returns 0 with fewer than 2 samples.
+    // Rate between the newest sample and the newest older sample that is at
+    // least window_sec old, so the span covers at least the window and at most
+    // one sample interval more. Samples arrive a little more than the report
+    // interval apart, so this keeps a 60 s window at four 15 s intervals. Before
+    // a full window exists the oldest sample is used, giving the rate over the
+    // samples available. After a long gap the previous sample is already older
+    // than the window, so a gap with no graphs shows as a low rate. Returns 0
+    // with fewer than 2 samples.
     double rolling_rate(double window_sec) const {
         if (count_ < 2)
             return 0.0;
         const size_t newest = (next_ + SPEED_METER_CAPACITY - 1) % SPEED_METER_CAPACITY;
-        size_t oldest = (newest + SPEED_METER_CAPACITY - 1) % SPEED_METER_CAPACITY;
-        for (size_t back = 2; back < count_; back++) {
-            const size_t i = (newest + SPEED_METER_CAPACITY - back) % SPEED_METER_CAPACITY;
-            if (!(times_[newest] - times_[i] <= window_sec))
+        size_t oldest = newest;
+        for (size_t back = 1; back < count_; back++) {
+            oldest = (newest + SPEED_METER_CAPACITY - back) % SPEED_METER_CAPACITY;
+            if (times_[newest] - times_[oldest] >= window_sec)
                 break;
-            oldest = i;
         }
         const double elapsed = times_[newest] - times_[oldest];
         if (!(elapsed > 0.0))
