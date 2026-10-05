@@ -32,7 +32,9 @@ options:
   --load-device N      GPU for the second process in the 2-core check
                        (default: --device; use another GPU if there is one)
   --load-pipeline N    --pipeline of that second process (default: 1)
-  --cpus LIST          cores for the 2-core check, for taskset -c (default: 0,1)
+  --cpus LIST          CPUs for the 2-core check, for taskset -c (default: the
+                       first two CPUs on different physical cores, from
+                       /sys/devices/system/cpu/cpu*/topology; else 0,1)
   --default-ntrims N   current default (default: read from build_flags/<arch>.flags
                        or TARI_ARCH_FLAGS, like tests/tari_c29_gpu_recall.py)
   --dry-run            use tests/ntrims_sweep_fake_solver.py instead of the GPU
@@ -54,7 +56,7 @@ warmup=""
 device=0
 load_device=""
 load_pipeline=1
-cpus="0,1"
+cpus=""
 default_ntrims=""
 dry_run=0
 
@@ -126,9 +128,43 @@ while read -r n; do
     ntrims_values+=("$n")
 done < <(printf '%s\n' "${requested[@]}" "$default_ntrims" | sort -rn | uniq)
 
+# Two logical CPUs on different physical cores. SMT siblings share a core,
+# so two of them would test one core, not two. TARI_SWEEP_CPU_SYSFS replaces
+# /sys/devices/system/cpu for the tests.
+pick_cpus() {
+    local sysfs="${TARI_SWEEP_CPU_SYSFS:-/sys/devices/system/cpu}" dir n key first="" first_key=""
+    local numbers=()
+    for dir in "$sysfs"/cpu[0-9]*; do
+        [[ -r "$dir/topology/core_id" ]] || continue
+        numbers+=("${dir##*/cpu}")
+    done
+    while read -r n; do
+        [[ -n "$n" ]] || continue
+        key="$(cat "$sysfs/cpu$n/topology/physical_package_id" 2>/dev/null || echo 0):$(cat "$sysfs/cpu$n/topology/core_id")"
+        if [[ -z "$first" ]]; then
+            first="$n"
+            first_key="$key"
+        elif [[ "$key" != "$first_key" ]]; then
+            echo "$first,$n"
+            return
+        fi
+    done < <(printf '%s\n' ${numbers[@]+"${numbers[@]}"} | sort -n)
+}
+
+if [[ -n "$cpus" ]]; then
+    cpus_source="from --cpus"
+else
+    cpus="$(pick_cpus)"
+    cpus_source="two different physical cores"
+    if [[ -z "$cpus" ]]; then
+        cpus="0,1"
+        cpus_source="CPU topology unknown, so these may share one core"
+    fi
+fi
+
 # The 2-core check pins both solver processes with taskset.
 pin=()
-pin_label="cores $cpus (taskset)"
+pin_label="pinned with taskset"
 if command -v taskset >/dev/null 2>&1; then
     pin=(taskset -c "$cpus")
 elif [[ $dry_run -eq 1 ]]; then
@@ -186,7 +222,7 @@ run_measured() {
     fi
 }
 
-# Prints: gps edges_min p50 p99 max ms_p50 ms_p99 ms_max busy oops overflow
+# Prints: gps edges_min p50 p99 max ms_p50 ms_p99 ms_max ms_mean busy oops overflow pipeline
 parse_log() {
     awk '
         function num(v) { return v ~ /^[0-9]+(\.[0-9]+)?$/ }
@@ -194,22 +230,25 @@ parse_log() {
             for (i = 2; i <= NF; i++) if ($i == "graphs/s") gps = $(i - 1)
         }
         /^surviving edges:/ { p = "e_" }
-        /^findcycles ms / { p = "m_" }
+        /^solver pipeline=/ { split($2, kv, "="); pipeline = kv[2] }
+        /^cycle search ms:/ { p = "m_" }
         /^cpu busy / { p = "b_" }
         /^lost edges / { p = "l_" }
-        /^(surviving edges:|findcycles ms |cpu busy |lost edges )/ {
+        /^(surviving edges:|cycle search ms:|cpu busy |lost edges )/ {
             for (i = 1; i <= NF; i++)
                 if (split($i, kv, "=") == 2) v[p kv[1]] = kv[2]
         }
         END {
-            split("e_min e_p50 e_p99 e_max m_p50 m_p99 m_max b_fraction l_oops_graphs l_node_overflow_graphs", keys, " ")
+            split("e_min e_p50 e_p99 e_max m_p50 m_p99 m_max m_mean b_fraction l_oops_graphs l_node_overflow_graphs", keys, " ")
             line = gps
             if (!num(gps)) exit 1
-            for (k = 1; k <= 10; k++) {
+            for (k = 1; k <= 11; k++) {
                 if (!num(v[keys[k]])) exit 1
                 line = line " " v[keys[k]]
             }
-            print line
+            # Without a "solver pipeline=" line the solver ran one context.
+            if (pipeline == "") pipeline = 1
+            print line " " pipeline
         }
     ' "$1" || die "cannot read the summary in $1 (is the solver built with the ntrims statistics?)"
 }
@@ -233,7 +272,7 @@ if [[ $dry_run -eq 0 ]] && command -v nvcc >/dev/null 2>&1; then
     cuda="$cuda (nvcc $(nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p'))"
 fi
 
-echo "arch,ntrims,kind,run,graphs_per_sec,edges_min,edges_p50,edges_p99,edges_max,findcycles_ms_p50,findcycles_ms_p99,findcycles_ms_max,busy_fraction,oops_graphs,node_overflow_graphs,log" > "$csv"
+echo "arch,ntrims,kind,run,pipeline,graphs_per_sec,edges_min,edges_p50,edges_p99,edges_max,search_ms_p50,search_ms_p99,search_ms_max,search_ms_mean,busy_fraction,projected_busy,oops_graphs,node_overflow_graphs,log" > "$csv"
 
 # Per ntrims (same index as ntrims_values).
 measured=()
@@ -245,6 +284,8 @@ ms_p99_full=()
 ms_p99_weak=()
 busy_full=()
 busy_weak=()
+busy_projected=()
+pipeline_weak=()
 stop_reason=()
 
 stopped=0
@@ -272,9 +313,9 @@ for i in "${!ntrims_values[@]}"; do
         log="$out_dir/ntrims-$n-run$r.log"
         run_measured "$log" -- --device "$device" --ntrims "$n"
         parsed="$(parse_log "$log")"
-        read -r gps emin ep50 ep99 emax m50 m99 mmax busy oops ovf <<< "$parsed"
-        echo "$arch,$n,full,$r,$gps,$emin,$ep50,$ep99,$emax,$m50,$m99,$mmax,$busy,$oops,$ovf,$(basename "$log")" >> "$csv"
-        echo "run $r: $gps g/s, edges max $emax, findcycles p99 $m99 ms, busy $busy"
+        read -r gps emin ep50 ep99 emax m50 m99 mmax mmean busy oops ovf pipe <<< "$parsed"
+        echo "$arch,$n,full,$r,$pipe,$gps,$emin,$ep50,$ep99,$emax,$m50,$m99,$mmax,$mmean,$busy,,$oops,$ovf,$(basename "$log")" >> "$csv"
+        echo "run $r: $gps g/s (pipeline $pipe), edges max $emax, search p99 $m99 ms, busy $busy"
         run_gps+=("$gps")
         p99s+=("$ep99")
         maxes+=("$emax")
@@ -283,7 +324,12 @@ for i in "${!ntrims_values[@]}"; do
         lost=$((lost + oops + ovf))
     done
 
+    gps_median[i]="$(median_of "${run_gps[@]}")"
+
     # 2-core check: a second solver on the same cores, then one measured run.
+    # Sharing one GPU with the second solver lowers this run's graph rate, so
+    # its measured busy fraction is too low. The stop rule uses the projected
+    # fraction instead: its search time per graph at the full-GPU median g/s.
     load_log="$out_dir/ntrims-$n-2core-load.log"
     log="$out_dir/ntrims-$n-2core.log"
     start_long "$load_log" ${pin[@]+"${pin[@]}"} -- --device "$load_device" --pipeline "$load_pipeline" --ntrims "$n"
@@ -293,22 +339,24 @@ for i in "${!ntrims_values[@]}"; do
     run_measured "$log" ${pin[@]+"${pin[@]}"} -- --device "$device" --ntrims "$n"
     stop_long "2-core load solver" "$load_log"
     parsed="$(parse_log "$log")"
-    read -r gps emin ep50 ep99 emax m50 m99 mmax busy oops ovf <<< "$parsed"
-    echo "$arch,$n,2core,1,$gps,$emin,$ep50,$ep99,$emax,$m50,$m99,$mmax,$busy,$oops,$ovf,$(basename "$log")" >> "$csv"
-    echo "2-core: $gps g/s, findcycles p99 $m99 ms, busy $busy"
+    read -r gps emin ep50 ep99 emax m50 m99 mmax mmean busy oops ovf pipe <<< "$parsed"
+    projected="$(calc "b = $mmean / 1000 * ${gps_median[i]}; if (b > 1) b = 1; printf \"%.4f\", b")"
+    echo "$arch,$n,2core,1,$pipe,$gps,$emin,$ep50,$ep99,$emax,$m50,$m99,$mmax,$mmean,$busy,$projected,$oops,$ovf,$(basename "$log")" >> "$csv"
+    echo "2-core: $gps g/s (pipeline $pipe), search p99 $m99 ms, busy $busy measured, $projected projected"
     p99s+=("$ep99")
     maxes+=("$emax")
     lost=$((lost + oops + ovf))
 
     measured[i]=1
     gps_runs[i]="${run_gps[*]}"
-    gps_median[i]="$(median_of "${run_gps[@]}")"
     edges_p99[i]="$(max_of "${p99s[@]}")"
     edges_max[i]="$(max_of "${maxes[@]}")"
     ms_p99_full[i]="$(max_of "${ms99s[@]}")"
     ms_p99_weak[i]="$m99"
     busy_full[i]="$(max_of "${busys[@]}")"
     busy_weak[i]="$busy"
+    busy_projected[i]="$projected"
+    pipeline_weak[i]="$pipe"
 
     reasons=()
     if [[ ${edges_max[i]} -gt $EDGE_LIMIT ]]; then
@@ -317,8 +365,8 @@ for i in "${!ntrims_values[@]}"; do
     if [[ $lost -gt 0 ]]; then
         reasons+=("OOPS or NODE OVERFLOW")
     fi
-    if calc "exit !($busy > $BUSY_LIMIT)"; then
-        reasons+=("2-core busy $busy > $BUSY_LIMIT")
+    if calc "exit !($projected > $BUSY_LIMIT)"; then
+        reasons+=("2-core projected busy $projected > $BUSY_LIMIT")
     fi
     if [[ ${#reasons[@]} -gt 0 ]]; then
         stop_reason[i]="$(printf '%s; ' "${reasons[@]}")"
@@ -360,16 +408,17 @@ done
     echo
     echo "- GPU: $gpu_name, driver $driver, CUDA $cuda"
     echo "- solver: $solver_label, --count $count, $runs runs per ntrims (median), auto pipeline, ${warmup} s warm-up"
-    echo "- 2-core check: $pin_label, second solver on device $load_device with --pipeline $load_pipeline"
-    echo "- limits: max edges <= $EDGE_LIMIT, no OOPS / NODE OVERFLOW, 2-core busy <= $BUSY_LIMIT; gain >= 0.5% and every run above the default's median"
+    echo "- 2-core check: CPUs $cpus ($cpus_source), $pin_label, second solver on device $load_device with --pipeline $load_pipeline"
+    echo "- limits: max edges <= $EDGE_LIMIT, no OOPS / NODE OVERFLOW, 2-core projected busy <= $BUSY_LIMIT; gain >= 0.5% and every run above the default's median"
+    echo "- busy = host cycle-search time / wall time. 2-core projected = the 2-core run's search ms per graph x the full-GPU median g/s, because a GPU shared with the second solver lowers the measured fraction"
     echo "- current default: $default_ntrims"
     echo
-    echo "| arch | ntrims | g/s median | g/s runs | vs default | edges p99 | edges max | findcycles ms p99 (full / 2-core) | busy (full / 2-core) | result |"
-    echo "|---|---|---|---|---|---|---|---|---|---|"
+    echo "| arch | ntrims | g/s median | g/s runs | vs default | edges p99 | edges max | search ms p99 (full / 2-core) | busy full | busy 2-core (measured / projected) | 2-core pipeline | result |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
     for i in "${!ntrims_values[@]}"; do
         n="${ntrims_values[$i]}"
         if [[ ${measured[$i]} -eq 0 ]]; then
-            echo "| $arch | $n | | | | | | | | not run (stopped above) |"
+            echo "| $arch | $n | | | | | | | | | | not run (stopped above) |"
             continue
         fi
         vs=""
@@ -387,8 +436,8 @@ done
         else
             result="no gain"
         fi
-        busy_cell="$(calc "printf \"%.1f%% / %.1f%%\", ${busy_full[$i]} * 100, ${busy_weak[$i]} * 100")"
-        echo "| $arch | $n | ${gps_median[$i]} | ${gps_runs[$i]} | $vs | ${edges_p99[$i]} | ${edges_max[$i]} | ${ms_p99_full[$i]} / ${ms_p99_weak[$i]} | $busy_cell | $result |"
+        busy_cell="$(calc "printf \"%.1f%% | %.1f%% / %.1f%%\", ${busy_full[$i]} * 100, ${busy_weak[$i]} * 100, ${busy_projected[$i]} * 100")"
+        echo "| $arch | $n | ${gps_median[$i]} | ${gps_runs[$i]} | $vs | ${edges_p99[$i]} | ${edges_max[$i]} | ${ms_p99_full[$i]} / ${ms_p99_weak[$i]} | $busy_cell | ${pipeline_weak[$i]} | $result |"
     done
 } > "$table"
 

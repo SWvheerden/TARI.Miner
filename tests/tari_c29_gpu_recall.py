@@ -75,20 +75,24 @@ FATAL_PATTERNS = (
 
 
 # Optional summary keys written by solvers with the ntrims instrumentation.
-# Percentiles are nearest-rank; busy_fraction is findcycles_sec / elapsed_sec.
+# Percentiles are nearest-rank; search_* is the host cycle search without the
+# GPU recovery; busy_fraction is search_sec / elapsed_sec.
 GRAPH_COST_INT_KEYS = (
     "edges_min",
     "edges_p50",
     "edges_p99",
     "edges_max",
+    "recovery_graphs",
     "oops_graphs",
     "node_overflow_graphs",
 )
 GRAPH_COST_NUMBER_KEYS = (
-    "findcycles_ms_p50",
-    "findcycles_ms_p99",
-    "findcycles_ms_max",
-    "findcycles_sec",
+    "search_ms_p50",
+    "search_ms_p99",
+    "search_ms_max",
+    "search_ms_mean",
+    "search_sec",
+    "recovery_sec",
     "elapsed_sec",
     "busy_fraction",
 )
@@ -207,14 +211,12 @@ def _validate_graph_costs(summary: Dict[str, object], graphs: int) -> None:
     ):
         raise RecallError("summary edges must satisfy min <= p50 <= p99 <= max")
     if not (
-        numbers["findcycles_ms_p50"]
-        <= numbers["findcycles_ms_p99"]
-        <= numbers["findcycles_ms_max"]
+        numbers["search_ms_p50"] <= numbers["search_ms_p99"] <= numbers["search_ms_max"]
     ):
-        raise RecallError("summary findcycles_ms must satisfy p50 <= p99 <= max")
+        raise RecallError("summary search_ms must satisfy p50 <= p99 <= max")
     if numbers["busy_fraction"] > 1:
         raise RecallError("summary busy_fraction must be <= 1")
-    for key in ("oops_graphs", "node_overflow_graphs"):
+    for key in ("recovery_graphs", "oops_graphs", "node_overflow_graphs"):
         if ints[key] > graphs:
             raise RecallError("summary {} exceeds graphs {}".format(key, graphs))
 
@@ -1158,10 +1160,13 @@ def self_test() -> int:
             "edges_p50": 120000,
             "edges_p99": 150000,
             "edges_max": 160000,
-            "findcycles_ms_p50": 4.5,
-            "findcycles_ms_p99": 7.25,
-            "findcycles_ms_max": 9.0,
-            "findcycles_sec": 0.005,
+            "search_ms_p50": 4.5,
+            "search_ms_p99": 7.25,
+            "search_ms_max": 9.0,
+            "search_ms_mean": 5.0,
+            "search_sec": 0.005,
+            "recovery_graphs": 1,
+            "recovery_sec": 0.002,
             "elapsed_sec": 0.2,
             "busy_fraction": 0.025,
             "oops_graphs": 0,
@@ -1179,11 +1184,11 @@ def self_test() -> int:
             == 1,
             "graph cost keys do not affect the proof comparison",
         )
-        integer_ms = dict(graph_costs, findcycles_ms_max=9, busy_fraction=0)
+        integer_ms = dict(graph_costs, search_ms_max=9, busy_fraction=0)
         integer_ms_path = root / "integer-ms.jsonl"
         _write_fixture(integer_ms_path, edges, summary_extra=integer_ms)
         check(
-            load_recall(integer_ms_path).summary["findcycles_ms_max"] == 9,
+            load_recall(integer_ms_path).summary["search_ms_max"] == 9,
             "integral JSON numbers are accepted for timing keys",
         )
 
@@ -1193,14 +1198,16 @@ def self_test() -> int:
             ("float edges", {"edges_min": 1.5}, "edges_min must be an integer"),
             ("bool", {"oops_graphs": False}, "oops_graphs must be an integer"),
             ("negative", {"edges_min": -1}, "edges_min must be >= 0"),
-            ("negative ms", {"findcycles_ms_p50": -0.5}, "finite number"),
+            ("negative ms", {"search_ms_p50": -0.5}, "finite number"),
             # json.loads accepts NaN, which is not valid JSON.
             ("nan", {"elapsed_sec": float("nan")}, "finite number"),
-            ("string ms", {"findcycles_sec": "1"}, "must be a number"),
+            ("string ms", {"search_sec": "1"}, "must be a number"),
             ("edge order", {"edges_p50": 170000}, "min <= p50"),
-            ("ms order", {"findcycles_ms_p99": 10.0}, "p50 <= p99"),
+            ("ms order", {"search_ms_p99": 10.0}, "p50 <= p99"),
             ("busy", {"busy_fraction": 1.5}, "busy_fraction"),
             ("oops count", {"oops_graphs": 2}, "exceeds graphs"),
+            ("recovery count", {"recovery_graphs": 2}, "exceeds graphs"),
+            ("negative recovery", {"recovery_sec": -1.0}, "finite number"),
         )
         for name, change, message in bad_costs:
             extra = change if name == "partial" else dict(graph_costs, **change)

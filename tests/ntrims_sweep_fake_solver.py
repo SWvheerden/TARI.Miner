@@ -9,12 +9,17 @@ and table can be tested without a GPU.
 TARI_FAKE_SOLVER_SCENARIO picks the numbers (default "edges"):
   edges     g/s +0.3% per 2 rounds below 50; edges grow until 40 is over the limit
   overflow  g/s as edges; small edges; NODE OVERFLOW at 44 and below
-  busy      g/s as edges; small edges; busy fraction over 40% at 36 and below
+  busy      g/s as edges; small edges; projected busy over 40% at 36 and below
   nogain    g/s flat at every ntrims
   noisy     48 has a high median but one slow run; 46 gains; the rest flat
   old       no ntrims statistics lines (a solver built before them)
   crash     exits 1 after the header
   loaddies  the long-running load process exits at once
+
+The cycle-search mean is set so that mean x g/s is the intended busy fraction
+(5%, or the busy scenario's value), while the printed measured fraction is
+half of that, as when two processes share one GPU. So the sweep's stop rule
+must use the projection, not the measured fraction.
 
 TARI_FAKE_SOLVER_STATE, if set, is a file this appends one line per measured
 run to, so the noisy scenario can tell the runs of one ntrims apart.
@@ -106,6 +111,7 @@ def main(argv):
     time.sleep(0.3)
     elapsed = count / gps
     ms_p50 = edges_max / 60000.0
+    mean_ms = busy / gps * 1000.0
     print("\n--- summary ---")
     print(
         "graphs solved  : {} in {:.2f} s  =>  {:.3f} graphs/s".format(
@@ -124,15 +130,17 @@ def main(argv):
         )
     )
     print(
-        "findcycles ms  : p50={:.3f} p99={:.3f} max={:.3f}  (main thread, per graph)".format(
-            ms_p50, ms_p50 * 1.5, ms_p50 * 3
+        "cycle search ms: p50={:.3f} p99={:.3f} max={:.3f} mean={:.4f}  "
+        "(host graph build + cycle finding per graph)".format(
+            ms_p50, ms_p50 * 1.5, ms_p50 * 3, mean_ms
         )
     )
     print(
-        "cpu busy       : fraction={:.4f}  (findcycles {:.3f} s / wall {:.3f} s)".format(
-            busy, busy * elapsed, elapsed
+        "cpu busy       : fraction={:.4f}  (cycle search {:.3f} s / wall {:.3f} s)".format(
+            busy / 2, busy / 2 * elapsed, elapsed
         )
     )
+    print("gpu recovery   : graphs={} total={:.3f} s".format(count // 42, count / 420.0))
     print("lost edges     : oops_graphs={} node_overflow_graphs={}".format(oops, overflow))
     return 0
 

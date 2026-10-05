@@ -77,7 +77,7 @@ checks=$((checks + 1))
 rows="$(wc -l < "$TEMP_ROOT/edges/sweep.csv" | tr -d ' ')"
 [[ "$rows" == 25 ]] || fail "edges: expected 25 CSV lines, got $rows"
 checks=$((checks + 1))
-grep -q "^sm_89,44,2core,1,13.773,82387,164775,296595,329550," "$TEMP_ROOT/edges/sweep.csv" \
+grep -q "^sm_89,44,2core,1,2,13.773,82387,164775,296595,329550," "$TEMP_ROOT/edges/sweep.csv" \
     || fail "edges: 2-core CSV row for 44"
 checks=$((checks + 1))
 grep -qF -- "--candidate-ntrims 42" "$TEMP_ROOT/edges.out" || fail "edges: recall command"
@@ -88,8 +88,10 @@ expect_choice overflow overflow 46 --default-ntrims 50
 expect_row overflow 44 "stop: OOPS or NODE OVERFLOW"
 
 expect_choice busy busy 40 --default-ntrims 50
-expect_row busy 36 "stop: 2-core busy 0.4500 > 0.40"
-expect_row busy 40 "| 35.0% / 35.0% |"
+# The measured fraction is half the projection (a shared GPU), so only the
+# projection reaches the limit.
+expect_row busy 36 "stop: 2-core projected busy 0.4500 > 0.40"
+expect_row busy 40 "| 17.5% | 17.5% / 35.0% | 2 | **chosen** |"
 
 expect_choice nogain nogain none --default-ntrims 50
 expect_row nogain 42 "| no gain |"
@@ -104,6 +106,38 @@ expect_row noisy 48 "| no gain |"
 TARI_ARCH_FLAGS="-DTARI_C29_DEFAULT_NTRIMS=48" expect_choice default48 edges 42 --ntrims "50 46 44 42 40"
 expect_row default48 48 "| default |"
 expect_row default48 50 "| -0.30% |"
+
+# 2-core CPUs: two different physical cores from the sysfs topology (sorted
+# numerically, so cpu10 does not come before cpu2), --cpus, or 0,1.
+make_topology() {
+    local dir="$1" n
+    shift
+    n=0
+    for core in "$@"; do
+        mkdir -p "$dir/cpu$n/topology"
+        echo 0 > "$dir/cpu$n/topology/physical_package_id"
+        echo "$core" > "$dir/cpu$n/topology/core_id"
+        n=$((n + 1))
+    done
+}
+make_topology "$TEMP_ROOT/smt-adjacent" 0 0 1 1 2 2 3 3 4 4 7
+make_topology "$TEMP_ROOT/smt-split" 0 1 0 1
+expect_cpus() {
+    local name="$1" expected="$2"
+    shift 2
+    checks=$((checks + 1))
+    if ! sweep "$name" nogain --default-ntrims 50 --ntrims "50" "$@"; then
+        fail "$name: sweep failed"
+        cat "$TEMP_ROOT/$name.out" >&2
+    elif ! grep -qF -- "- 2-core check: CPUs $expected" "$TEMP_ROOT/$name/sweep.md"; then
+        fail "$name: expected [CPUs $expected]"
+        cat "$TEMP_ROOT/$name/sweep.md" >&2
+    fi
+}
+TARI_SWEEP_CPU_SYSFS="$TEMP_ROOT/smt-adjacent" expect_cpus cpus-adjacent "0,2 (two different physical cores)"
+TARI_SWEEP_CPU_SYSFS="$TEMP_ROOT/smt-split" expect_cpus cpus-split "0,1 (two different physical cores)"
+TARI_SWEEP_CPU_SYSFS="$TEMP_ROOT/missing" expect_cpus cpus-unknown "0,1 (CPU topology unknown"
+TARI_SWEEP_CPU_SYSFS="$TEMP_ROOT/smt-adjacent" expect_cpus cpus-override "1,0 (from --cpus)" --cpus 1,0
 
 expect_failure old old "is the solver built with the ntrims statistics?" --default-ntrims 50
 expect_failure crash crash "solver run failed" --default-ntrims 50

@@ -278,54 +278,65 @@ int main() {
         tari_miner::GraphCostStats empty_stats(1000);
         const tari_miner::GraphCostSummary s = empty_stats.summarize(0.0);
         expect_rate("no graphs edges max", 0.0, s.edges_max);
+        expect_rate("no graphs mean", 0.0, s.search_ms_mean);
         expect_rate("no graphs busy", 0.0, s.busy_fraction);
         expect_line(
             "no graphs json",
             ",\"edges_min\":0,\"edges_p50\":0,\"edges_p99\":0,\"edges_max\":0"
-            ",\"findcycles_ms_p50\":0.000,\"findcycles_ms_p99\":0.000,\"findcycles_ms_max\":0.000"
-            ",\"findcycles_sec\":0.000,\"elapsed_sec\":0.000,\"busy_fraction\":0.000000"
+            ",\"search_ms_p50\":0.000,\"search_ms_p99\":0.000,\"search_ms_max\":0.000"
+            ",\"search_ms_mean\":0.0000,\"search_sec\":0.000"
+            ",\"recovery_graphs\":0,\"recovery_sec\":0.000"
+            ",\"elapsed_sec\":0.000,\"busy_fraction\":0.000000"
             ",\"oops_graphs\":0,\"node_overflow_graphs\":0",
             tari_miner::format_graph_cost_json(s)
         );
     }
 
     {
-        // Values arrive out of order; one graph is over the cap (OOPS) and
-        // one cycle search reports a NODE OVERFLOW.
+        // Values arrive out of order; one graph is over the cap (OOPS), one
+        // search reports a NODE OVERFLOW, one found a cycle (recovery), and
+        // one graph had no edges so was never searched.
         tari_miner::GraphCostStats stats(1000);
-        stats.reserve(4);
-        const uint32_t edges[] = {500, 1001, 200, 800};
+        stats.reserve(5);
+        const uint32_t edges[] = {500, 1001, 200, 800, 0};
         for (uint32_t e : edges)
             stats.add_trim(e);
-        stats.add_findcycles(0.004, false);
-        stats.add_findcycles(0.001, false);
-        stats.add_findcycles(0.003, true);
-        stats.add_findcycles(-1.0, false);  // a clock step back counts as 0
+        stats.add_search(0.004, false, 0.0, false);
+        stats.add_search(0.001, true, 0.020, false);
+        stats.add_search(0.003, false, 0.0, true);
+        stats.add_search(-1.0, true, -1.0, false);  // a clock step back counts as 0
         const tari_miner::GraphCostSummary s = stats.summarize(0.05);
-        expect_rate("edges min", 200.0, s.edges_min);
+        expect_rate("edges min", 0.0, s.edges_min);
         expect_rate("edges p50", 500.0, s.edges_p50);
         expect_rate("edges p99", 1001.0, s.edges_p99);
         expect_rate("edges max", 1001.0, s.edges_max);
-        expect_rate("findcycles p50", 1.0, s.findcycles_ms_p50);
-        expect_rate("findcycles p99", 4.0, s.findcycles_ms_p99);
-        expect_rate("findcycles max", 4.0, s.findcycles_ms_max);
-        expect_rate("findcycles total", 0.008, s.findcycles_sec);
+        expect_rate("search p50", 1.0, s.search_ms_p50);
+        expect_rate("search p99", 4.0, s.search_ms_p99);
+        expect_rate("search max", 4.0, s.search_ms_max);
+        expect_rate("search mean over all graphs", 1.6, s.search_ms_mean);
+        expect_rate("search total", 0.008, s.search_sec);
+        expect_rate("recovery graphs", 2.0, (double)s.recovery_graphs);
+        expect_rate("recovery total", 0.020, s.recovery_sec);
         expect_rate("busy fraction", 0.16, s.busy_fraction);
         expect_rate("oops graphs", 1.0, (double)s.oops_graphs);
         expect_rate("node overflow graphs", 1.0, (double)s.node_overflow_graphs);
         expect_line(
             "graph cost lines",
-            "surviving edges: min=200 p50=500 p99=1001 max=1001  (per graph, before the MAXEDGES=1000 cap)\n"
-            "findcycles ms  : p50=1.000 p99=4.000 max=4.000  (main thread, per graph)\n"
-            "cpu busy       : fraction=0.1600  (findcycles 0.008 s / wall 0.050 s)\n"
+            "surviving edges: min=0 p50=500 p99=1001 max=1001  (per graph, before the MAXEDGES=1000 cap)\n"
+            "cycle search ms: p50=1.000 p99=4.000 max=4.000 mean=1.6000  (host graph build + cycle "
+            "finding per graph, main-thread wall time, without GPU recovery; mean over all graphs)\n"
+            "cpu busy       : fraction=0.1600  (cycle search 0.008 s / wall 0.050 s)\n"
+            "gpu recovery   : graphs=2 total=0.020 s  (proof recovery for graphs with a cycle)\n"
             "lost edges     : oops_graphs=1 node_overflow_graphs=1\n",
             tari_miner::format_graph_cost_lines(s, 1000)
         );
         expect_line(
             "graph cost json",
-            ",\"edges_min\":200,\"edges_p50\":500,\"edges_p99\":1001,\"edges_max\":1001"
-            ",\"findcycles_ms_p50\":1.000,\"findcycles_ms_p99\":4.000,\"findcycles_ms_max\":4.000"
-            ",\"findcycles_sec\":0.008,\"elapsed_sec\":0.050,\"busy_fraction\":0.160000"
+            ",\"edges_min\":0,\"edges_p50\":500,\"edges_p99\":1001,\"edges_max\":1001"
+            ",\"search_ms_p50\":1.000,\"search_ms_p99\":4.000,\"search_ms_max\":4.000"
+            ",\"search_ms_mean\":1.6000,\"search_sec\":0.008"
+            ",\"recovery_graphs\":2,\"recovery_sec\":0.020"
+            ",\"elapsed_sec\":0.050,\"busy_fraction\":0.160000"
             ",\"oops_graphs\":1,\"node_overflow_graphs\":1",
             tari_miner::format_graph_cost_json(s)
         );

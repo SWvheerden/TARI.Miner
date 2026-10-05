@@ -1312,6 +1312,10 @@ struct solver_ctx {
   graph<word_t> cg;
   uint2 soledges[PROOFSIZE];
   std::vector<u32> sols; // concatenation of all proof's indices
+  // Wall time (steady clock) of the last findcycles_with_keys host search:
+  // graph reset, edge inserts and cycle finding, not the GPU recovery of
+  // any cycle found. Statistics only.
+  double last_host_search_sec = 0.0;
 #if RECOVERY_SMALL_OUTPUT
   u32 *recoverIndexes;
 #endif
@@ -1355,9 +1359,12 @@ struct solver_ctx {
   }
 
   int findcycles_with_keys(uint2 *edges, u32 nedges, const siphash_keys &keys, std::vector<u32> &outSols) {
+    const auto search_start = std::chrono::steady_clock::now();
     cg.reset();
     for (u32 i = 0; i < nedges; i++)
       cg.add_compress_edge(edges[i].x, edges[i].y);
+    last_host_search_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - search_start).count();
     for (u32 s = 0 ;s < cg.nsols; s++) {
       // print_log("Solution");
       for (u32 j = 0; j < PROOFSIZE; j++) {

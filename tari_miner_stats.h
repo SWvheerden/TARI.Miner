@@ -142,10 +142,13 @@ struct GraphCostSummary {
     uint32_t edges_p50 = 0;
     uint32_t edges_p99 = 0;
     uint32_t edges_max = 0;
-    double findcycles_ms_p50 = 0.0;
-    double findcycles_ms_p99 = 0.0;
-    double findcycles_ms_max = 0.0;
-    double findcycles_sec = 0.0;
+    double search_ms_p50 = 0.0;
+    double search_ms_p99 = 0.0;
+    double search_ms_max = 0.0;
+    double search_ms_mean = 0.0;  // over every trimmed graph, searched or not
+    double search_sec = 0.0;
+    uint64_t recovery_graphs = 0;
+    double recovery_sec = 0.0;
     double elapsed_sec = 0.0;
     double busy_fraction = 0.0;
     uint64_t oops_graphs = 0;
@@ -164,7 +167,7 @@ public:
     void reserve(uint64_t graphs) {
         const size_t n = (size_t)std::min<uint64_t>(graphs, (uint64_t)1 << 20);
         edges_.reserve(n);
-        findcycles_ms_.reserve(n);
+        search_ms_.reserve(n);
     }
 
     // Surviving edges of one trimmed graph, before the MAXEDGES cap.
@@ -174,38 +177,50 @@ public:
             oops_graphs_++;
     }
 
-    // Time the main thread spent in the cycle search of one graph, and
-    // whether its compressor reported a NODE OVERFLOW.
-    void add_findcycles(double sec, bool node_overflow) {
-        if (!std::isfinite(sec) || sec < 0.0)
-            sec = 0.0;
-        findcycles_ms_.push_back(sec * 1000.0);
-        findcycles_sec_ += sec;
+    // One graph's host cycle search (graph build and cycle finding, without
+    // the GPU recovery of a cycle found), the recovery time if it found a
+    // cycle, and whether its compressor reported a NODE OVERFLOW.
+    void add_search(double search_sec, bool recovered, double recovery_sec, bool node_overflow) {
+        if (!std::isfinite(search_sec) || search_sec < 0.0)
+            search_sec = 0.0;
+        if (!std::isfinite(recovery_sec) || recovery_sec < 0.0)
+            recovery_sec = 0.0;
+        search_ms_.push_back(search_sec * 1000.0);
+        search_sec_ += search_sec;
+        if (recovered) {
+            recovery_graphs_++;
+            recovery_sec_ += recovery_sec;
+        }
         if (node_overflow)
             node_overflow_graphs_++;
     }
 
-    // busy_fraction is the cycle-search time over the wall time of the run:
+    // busy_fraction is the host search time over the wall time of the run:
     // the share of the main thread spent searching for cycles.
+    // search_ms_mean x graphs/s / 1000 gives the same fraction at another
+    // graph rate.
     GraphCostSummary summarize(double elapsed_sec) {
         std::sort(edges_.begin(), edges_.end());
-        std::sort(findcycles_ms_.begin(), findcycles_ms_.end());
+        std::sort(search_ms_.begin(), search_ms_.end());
         GraphCostSummary s;
         if (!edges_.empty()) {
             s.edges_min = edges_.front();
             s.edges_p50 = nearest_rank(edges_, 50);
             s.edges_p99 = nearest_rank(edges_, 99);
             s.edges_max = edges_.back();
+            s.search_ms_mean = search_sec_ * 1000.0 / (double)edges_.size();
         }
-        if (!findcycles_ms_.empty()) {
-            s.findcycles_ms_p50 = nearest_rank(findcycles_ms_, 50);
-            s.findcycles_ms_p99 = nearest_rank(findcycles_ms_, 99);
-            s.findcycles_ms_max = findcycles_ms_.back();
+        if (!search_ms_.empty()) {
+            s.search_ms_p50 = nearest_rank(search_ms_, 50);
+            s.search_ms_p99 = nearest_rank(search_ms_, 99);
+            s.search_ms_max = search_ms_.back();
         }
-        s.findcycles_sec = findcycles_sec_;
+        s.search_sec = search_sec_;
+        s.recovery_graphs = recovery_graphs_;
+        s.recovery_sec = recovery_sec_;
         if (std::isfinite(elapsed_sec) && elapsed_sec > 0.0) {
             s.elapsed_sec = elapsed_sec;
-            s.busy_fraction = std::min(1.0, findcycles_sec_ / elapsed_sec);
+            s.busy_fraction = std::min(1.0, search_sec_ / elapsed_sec);
         }
         s.oops_graphs = oops_graphs_;
         s.node_overflow_graphs = node_overflow_graphs_;
@@ -215,8 +230,10 @@ public:
 private:
     uint32_t maxedges_;
     std::vector<uint32_t> edges_;
-    std::vector<double> findcycles_ms_;
-    double findcycles_sec_ = 0.0;
+    std::vector<double> search_ms_;
+    double search_sec_ = 0.0;
+    uint64_t recovery_graphs_ = 0;
+    double recovery_sec_ = 0.0;
     uint64_t oops_graphs_ = 0;
     uint64_t node_overflow_graphs_ = 0;
 };
@@ -224,16 +241,19 @@ private:
 // Lines for the solver's "--- summary ---" block, each ending in a newline.
 // tools/ntrims_sweep.{sh,ps1} read the key=value fields.
 inline std::string format_graph_cost_lines(const GraphCostSummary &s, uint32_t maxedges) {
-    char text[640];
+    char text[1024];
     std::snprintf(
         text, sizeof(text),
         "surviving edges: min=%u p50=%u p99=%u max=%u  (per graph, before the MAXEDGES=%u cap)\n"
-        "findcycles ms  : p50=%.3f p99=%.3f max=%.3f  (main thread, per graph)\n"
-        "cpu busy       : fraction=%.4f  (findcycles %.3f s / wall %.3f s)\n"
+        "cycle search ms: p50=%.3f p99=%.3f max=%.3f mean=%.4f  (host graph build + cycle "
+        "finding per graph, main-thread wall time, without GPU recovery; mean over all graphs)\n"
+        "cpu busy       : fraction=%.4f  (cycle search %.3f s / wall %.3f s)\n"
+        "gpu recovery   : graphs=%llu total=%.3f s  (proof recovery for graphs with a cycle)\n"
         "lost edges     : oops_graphs=%llu node_overflow_graphs=%llu\n",
         s.edges_min, s.edges_p50, s.edges_p99, s.edges_max, maxedges,
-        s.findcycles_ms_p50, s.findcycles_ms_p99, s.findcycles_ms_max,
-        s.busy_fraction, s.findcycles_sec, s.elapsed_sec,
+        s.search_ms_p50, s.search_ms_p99, s.search_ms_max, s.search_ms_mean,
+        s.busy_fraction, s.search_sec, s.elapsed_sec,
+        (unsigned long long)s.recovery_graphs, s.recovery_sec,
         (unsigned long long)s.oops_graphs, (unsigned long long)s.node_overflow_graphs
     );
     return text;
@@ -242,16 +262,20 @@ inline std::string format_graph_cost_lines(const GraphCostSummary &s, uint32_t m
 // The optional keys of the recall JSONL summary record, as a fragment that
 // starts with a comma. Fixed-point numbers, so no exponents.
 inline std::string format_graph_cost_json(const GraphCostSummary &s) {
-    char text[512];
+    char text[768];
     std::snprintf(
         text, sizeof(text),
         ",\"edges_min\":%u,\"edges_p50\":%u,\"edges_p99\":%u,\"edges_max\":%u"
-        ",\"findcycles_ms_p50\":%.3f,\"findcycles_ms_p99\":%.3f,\"findcycles_ms_max\":%.3f"
-        ",\"findcycles_sec\":%.3f,\"elapsed_sec\":%.3f,\"busy_fraction\":%.6f"
+        ",\"search_ms_p50\":%.3f,\"search_ms_p99\":%.3f,\"search_ms_max\":%.3f"
+        ",\"search_ms_mean\":%.4f,\"search_sec\":%.3f"
+        ",\"recovery_graphs\":%llu,\"recovery_sec\":%.3f"
+        ",\"elapsed_sec\":%.3f,\"busy_fraction\":%.6f"
         ",\"oops_graphs\":%llu,\"node_overflow_graphs\":%llu",
         s.edges_min, s.edges_p50, s.edges_p99, s.edges_max,
-        s.findcycles_ms_p50, s.findcycles_ms_p99, s.findcycles_ms_max,
-        s.findcycles_sec, s.elapsed_sec, s.busy_fraction,
+        s.search_ms_p50, s.search_ms_p99, s.search_ms_max,
+        s.search_ms_mean, s.search_sec,
+        (unsigned long long)s.recovery_graphs, s.recovery_sec,
+        s.elapsed_sec, s.busy_fraction,
         (unsigned long long)s.oops_graphs, (unsigned long long)s.node_overflow_graphs
     );
     return text;

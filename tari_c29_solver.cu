@@ -316,12 +316,17 @@ int main(int argc, char **argv) {
         }
     };
 
-    // The cycle search runs on this (main) thread in both paths; time it here.
+    // The cycle search runs on this (main) thread in both paths. The context
+    // times the host part; the rest of the call is the GPU recovery of any
+    // cycle found.
     auto find_cycles = [&](SolverCtx *c, u32 nedges) {
         const size_t overflows_before = node_overflows(c);
         const double start = now_sec();
         int rc = c->findcycles_copied_status(nedges);
-        graph_costs.add_findcycles(now_sec() - start, node_overflows(c) != overflows_before);
+        const double total = now_sec() - start;
+        graph_costs.add_search(c->last_host_search_sec, c->cg.nsols > 0,
+                               total - c->last_host_search_sec,
+                               node_overflows(c) != overflows_before);
         return rc;
     };
 

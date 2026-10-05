@@ -17,7 +17,9 @@
 # -Device N           GPU for the measured runs (default: 0)
 # -LoadDevice N       GPU for the second process in the 2-core check (default: -Device)
 # -LoadPipeline N     --pipeline of that second process (default: 1)
-# -AffinityMask N     cores for the 2-core check, as a bit mask (default: 3 = cores 0 and 1)
+# -AffinityMask N     logical CPUs for the 2-core check, as a bit mask (default: two
+#                     different physical cores: 5 = logical CPUs 0 and 2 with SMT,
+#                     whose siblings are numbered next to each other, else 3)
 # -DefaultNtrims N    current default (default: read from build_flags\<arch>.flags or
 #                     TARI_ARCH_FLAGS, like tests\tari_c29_gpu_recall.py)
 # -Python CMD         Python used for the default and the dry run (default: python)
@@ -33,7 +35,7 @@ param(
     [string]$Device = '0',
     [string]$LoadDevice = '',
     [string]$LoadPipeline = '1',
-    [string]$AffinityMask = '3',
+    [string]$AffinityMask = '',
     [string]$DefaultNtrims = '',
     [string]$Python = 'python',
     [switch]$DryRun
@@ -85,6 +87,39 @@ if ($WarmupSeconds -eq '') {
     if ($DryRun) { $WarmupSeconds = '0' } else { $WarmupSeconds = '60' }
 }
 if ($LoadDevice -eq '') { $LoadDevice = $Device }
+
+# Two logical CPUs on different physical cores: Windows numbers SMT siblings
+# next to each other, so 0 and 1 are one core. TARI_SWEEP_TOPOLOGY
+# ("cores,logical") replaces the detection for the tests.
+$affinitySource = 'from -AffinityMask'
+if ($AffinityMask -eq '') {
+    $cores = 0
+    $logical = 0
+    if ($env:TARI_SWEEP_TOPOLOGY) {
+        $parts = $env:TARI_SWEEP_TOPOLOGY -split ','
+        $cores = [int]$parts[0]
+        $logical = [int]$parts[1]
+    } else {
+        try {
+            foreach ($cpu in @(Get-CimInstance Win32_Processor)) {
+                $cores += [int]$cpu.NumberOfCores
+                $logical += [int]$cpu.NumberOfLogicalProcessors
+            }
+        } catch {
+            $cores = 0
+        }
+    }
+    if ($cores -ge 2 -and $logical -gt $cores) {
+        $AffinityMask = '5'
+        $affinitySource = "logical CPUs 0 and 2: $cores cores, $logical logical, SMT on"
+    } elseif ($cores -ge 2) {
+        $AffinityMask = '3'
+        $affinitySource = "logical CPUs 0 and 1: $cores cores, no SMT"
+    } else {
+        $AffinityMask = '3'
+        $affinitySource = 'CPU topology unknown, so these may share one core'
+    }
+}
 foreach ($value in @($Count, $Runs, $WarmupSeconds, $Device, $LoadDevice, $LoadPipeline, $AffinityMask)) {
     if (-not (Test-Uint $value)) { Fail "not a whole number: $value" }
 }
@@ -197,7 +232,7 @@ function Read-Summary {
     $patterns = @(
         '(?m)^graphs solved\s*:.*=>\s*([0-9.]+) graphs/s',
         '(?m)^surviving edges:\s*min=([0-9]+) p50=([0-9]+) p99=([0-9]+) max=([0-9]+)',
-        '(?m)^findcycles ms\s*:\s*p50=([0-9.]+) p99=([0-9.]+) max=([0-9.]+)',
+        '(?m)^cycle search ms:\s*p50=([0-9.]+) p99=([0-9.]+) max=([0-9.]+) mean=([0-9.]+)',
         '(?m)^cpu busy\s*:\s*fraction=([0-9.]+)',
         '(?m)^lost edges\s*:\s*oops_graphs=([0-9]+) node_overflow_graphs=([0-9]+)'
     )
@@ -209,10 +244,15 @@ function Read-Summary {
         }
         for ($g = 1; $g -lt $m.Groups.Count; $g++) { $values += $m.Groups[$g].Value }
     }
+    # Without a "solver pipeline=" line the solver ran one context.
+    $pipeline = '1'
+    $m = [regex]::Match($text, '(?m)^solver pipeline=([0-9]+)')
+    if ($m.Success) { $pipeline = $m.Groups[1].Value }
     return [pscustomobject]@{
         Gps = $values[0]; EdgesMin = $values[1]; EdgesP50 = $values[2]; EdgesP99 = $values[3]
         EdgesMax = $values[4]; MsP50 = $values[5]; MsP99 = $values[6]; MsMax = $values[7]
-        Busy = $values[8]; Oops = $values[9]; Overflow = $values[10]
+        MsMean = $values[8]; Busy = $values[9]; Oops = $values[10]; Overflow = $values[11]
+        Pipeline = $pipeline
     }
 }
 
@@ -245,12 +285,13 @@ if (-not $DryRun -and (Get-Command nvcc -ErrorAction SilentlyContinue)) {
 }
 
 $csvLines = New-Object System.Collections.Generic.List[string]
-$csvLines.Add('arch,ntrims,kind,run,graphs_per_sec,edges_min,edges_p50,edges_p99,edges_max,findcycles_ms_p50,findcycles_ms_p99,findcycles_ms_max,busy_fraction,oops_graphs,node_overflow_graphs,log')
+$csvLines.Add('arch,ntrims,kind,run,pipeline,graphs_per_sec,edges_min,edges_p50,edges_p99,edges_max,search_ms_p50,search_ms_p99,search_ms_max,search_ms_mean,busy_fraction,projected_busy,oops_graphs,node_overflow_graphs,log')
 
 function Add-CsvRow {
-    param([int]$N, [string]$Kind, [int]$Run, $S, [string]$Log)
-    $csvLines.Add((@($Arch, $N, $Kind, $Run, $S.Gps, $S.EdgesMin, $S.EdgesP50, $S.EdgesP99, $S.EdgesMax,
-        $S.MsP50, $S.MsP99, $S.MsMax, $S.Busy, $S.Oops, $S.Overflow, (Split-Path -Leaf $Log)) -join ','))
+    param([int]$N, [string]$Kind, [int]$Run, $S, [string]$Projected, [string]$Log)
+    $csvLines.Add((@($Arch, $N, $Kind, $Run, $S.Pipeline, $S.Gps, $S.EdgesMin, $S.EdgesP50, $S.EdgesP99,
+        $S.EdgesMax, $S.MsP50, $S.MsP99, $S.MsMax, $S.MsMean, $S.Busy, $Projected, $S.Oops,
+        $S.Overflow, (Split-Path -Leaf $Log)) -join ','))
 }
 
 $results = @()
@@ -259,7 +300,8 @@ try {
     foreach ($n in $ntrimsValues) {
         $result = [pscustomobject]@{
             Ntrims = $n; Measured = $false; GpsRuns = @(); Median = 0.0; EdgesP99 = ''; EdgesMax = ''
-            MsP99Full = ''; MsP99Weak = ''; BusyFull = ''; BusyWeak = ''; Stop = ''; Gain = $false
+            MsP99Full = ''; MsP99Weak = ''; BusyFull = ''; BusyWeak = ''; BusyProjected = ''
+            PipelineWeak = ''; Stop = ''; Gain = $false
         }
         $results += $result
         if ($stopped) { continue }
@@ -268,24 +310,30 @@ try {
 
         if ([int]$WarmupSeconds -gt 0) {
             Write-Host "warm-up $WarmupSeconds s"
-            $base = Join-Path $Out "ntrims-$n-warmup"
-            Start-Long -Arguments $ntrimsArgs -LogBase $base
+            $warmBase = Join-Path $Out "ntrims-$n-warmup"
+            Start-Long -Arguments $ntrimsArgs -LogBase $warmBase
             Start-Sleep -Seconds ([int]$WarmupSeconds)
-            Stop-Long -What 'warm-up solver' -LogBase $base
+            Stop-Long -What 'warm-up solver' -LogBase $warmBase
         }
 
         $p99s = @(); $maxes = @(); $ms99s = @(); $busys = @(); $lost = 0
         for ($r = 1; $r -le [int]$Runs; $r++) {
             $log = Invoke-Measured -Arguments $ntrimsArgs -LogBase (Join-Path $Out "ntrims-$n-run$r")
             $s = Read-Summary $log
-            Add-CsvRow -N $n -Kind 'full' -Run $r -S $s -Log $log
-            Write-Host "run ${r}: $($s.Gps) g/s, edges max $($s.EdgesMax), findcycles p99 $($s.MsP99) ms, busy $($s.Busy)"
+            Add-CsvRow -N $n -Kind 'full' -Run $r -S $s -Projected '' -Log $log
+            Write-Host "run ${r}: $($s.Gps) g/s (pipeline $($s.Pipeline)), edges max $($s.EdgesMax), search p99 $($s.MsP99) ms, busy $($s.Busy)"
             $result.GpsRuns += $s.Gps
             $p99s += $s.EdgesP99; $maxes += $s.EdgesMax; $ms99s += $s.MsP99; $busys += $s.Busy
             $lost += [long]$s.Oops + [long]$s.Overflow
         }
 
+        $result.Median = Get-Median ($result.GpsRuns | ForEach-Object { ConvertTo-Number $_ })
+
         # 2-core check: a second solver on the same cores, then one measured run.
+        # Sharing one GPU with the second solver lowers this run's graph rate,
+        # so its measured busy fraction is too low. The stop rule uses the
+        # projected fraction instead: its search time per graph at the
+        # full-GPU median g/s.
         $loadBase = Join-Path $Out "ntrims-$n-2core-load"
         Start-Long -Arguments @('--device', $LoadDevice, '--pipeline', $LoadPipeline, '--ntrims', "$n") `
             -LogBase $loadBase -Affinity ([long]$AffinityMask)
@@ -296,24 +344,28 @@ try {
             -Affinity ([long]$AffinityMask)
         Stop-Long -What '2-core load solver' -LogBase $loadBase
         $s = Read-Summary $log
-        Add-CsvRow -N $n -Kind '2core' -Run 1 -S $s -Log $log
-        Write-Host "2-core: $($s.Gps) g/s, findcycles p99 $($s.MsP99) ms, busy $($s.Busy)"
+        $projected = [Math]::Min(1.0, (ConvertTo-Number $s.MsMean) / 1000 * $result.Median).ToString('F4', $inv)
+        Add-CsvRow -N $n -Kind '2core' -Run 1 -S $s -Projected $projected -Log $log
+        Write-Host "2-core: $($s.Gps) g/s (pipeline $($s.Pipeline)), search p99 $($s.MsP99) ms, busy $($s.Busy) measured, $projected projected"
         $p99s += $s.EdgesP99; $maxes += $s.EdgesMax
         $lost += [long]$s.Oops + [long]$s.Overflow
 
         $result.Measured = $true
-        $result.Median = Get-Median ($result.GpsRuns | ForEach-Object { ConvertTo-Number $_ })
         $result.EdgesP99 = Get-MaxText $p99s
         $result.EdgesMax = Get-MaxText $maxes
         $result.MsP99Full = Get-MaxText $ms99s
         $result.MsP99Weak = $s.MsP99
         $result.BusyFull = Get-MaxText $busys
         $result.BusyWeak = $s.Busy
+        $result.BusyProjected = $projected
+        $result.PipelineWeak = $s.Pipeline
 
         $reasons = @()
         if ([long]$result.EdgesMax -gt $EdgeLimit) { $reasons += "max edges $($result.EdgesMax) > $EdgeLimit" }
         if ($lost -gt 0) { $reasons += 'OOPS or NODE OVERFLOW' }
-        if ((ConvertTo-Number $s.Busy) -gt $BusyLimit) { $reasons += "2-core busy $($s.Busy) > $BusyLimitText" }
+        if ((ConvertTo-Number $projected) -gt $BusyLimit) {
+            $reasons += "2-core projected busy $projected > $BusyLimitText"
+        }
         if ($reasons.Count -gt 0) {
             $result.Stop = $reasons -join '; '
             Write-Host "stop: $($result.Stop)"
@@ -351,15 +403,16 @@ $md.Add("## ntrims sweep: $Arch")
 $md.Add('')
 $md.Add("- GPU: $gpuName, driver $driver, CUDA $cuda")
 $md.Add("- solver: $solverLabel, --count $Count, $Runs runs per ntrims (median), auto pipeline, $WarmupSeconds s warm-up")
-$md.Add("- 2-core check: affinity mask $AffinityMask, second solver on device $LoadDevice with --pipeline $LoadPipeline")
-$md.Add("- limits: max edges <= $EdgeLimit, no OOPS / NODE OVERFLOW, 2-core busy <= $BusyLimitText; gain >= 0.5% and every run above the default's median")
+$md.Add("- 2-core check: affinity mask $AffinityMask ($affinitySource), second solver on device $LoadDevice with --pipeline $LoadPipeline")
+$md.Add("- limits: max edges <= $EdgeLimit, no OOPS / NODE OVERFLOW, 2-core projected busy <= $BusyLimitText; gain >= 0.5% and every run above the default's median")
+$md.Add("- busy = host cycle-search time / wall time. 2-core projected = the 2-core run's search ms per graph x the full-GPU median g/s, because a GPU shared with the second solver lowers the measured fraction")
 $md.Add("- current default: $DefaultNtrims")
 $md.Add('')
-$md.Add('| arch | ntrims | g/s median | g/s runs | vs default | edges p99 | edges max | findcycles ms p99 (full / 2-core) | busy (full / 2-core) | result |')
-$md.Add('|---|---|---|---|---|---|---|---|---|---|')
+$md.Add('| arch | ntrims | g/s median | g/s runs | vs default | edges p99 | edges max | search ms p99 (full / 2-core) | busy full | busy 2-core (measured / projected) | 2-core pipeline | result |')
+$md.Add('|---|---|---|---|---|---|---|---|---|---|---|---|')
 foreach ($r in $results) {
     if (-not $r.Measured) {
-        $md.Add("| $Arch | $($r.Ntrims) | | | | | | | | not run (stopped above) |")
+        $md.Add("| $Arch | $($r.Ntrims) | | | | | | | | | | not run (stopped above) |")
         continue
     }
     $vs = ''
@@ -371,9 +424,10 @@ foreach ($r in $results) {
     elseif ($null -ne $chosen -and $r.Ntrims -eq $chosen.Ntrims) { $res = '**chosen**' }
     elseif ($r.Gain) { $res = 'gain' }
     else { $res = 'no gain' }
-    $busyCell = [string]::Format($inv, '{0:F1}% / {1:F1}%',
-        (ConvertTo-Number $r.BusyFull) * 100, (ConvertTo-Number $r.BusyWeak) * 100)
-    $md.Add("| $Arch | $($r.Ntrims) | $($r.Median.ToString('F3', $inv)) | $($r.GpsRuns -join ' ') | $vs | $($r.EdgesP99) | $($r.EdgesMax) | $($r.MsP99Full) / $($r.MsP99Weak) | $busyCell | $res |")
+    $busyCell = [string]::Format($inv, '{0:F1}% | {1:F1}% / {2:F1}%',
+        (ConvertTo-Number $r.BusyFull) * 100, (ConvertTo-Number $r.BusyWeak) * 100,
+        (ConvertTo-Number $r.BusyProjected) * 100)
+    $md.Add("| $Arch | $($r.Ntrims) | $($r.Median.ToString('F3', $inv)) | $($r.GpsRuns -join ' ') | $vs | $($r.EdgesP99) | $($r.EdgesMax) | $($r.MsP99Full) / $($r.MsP99Weak) | $busyCell | $($r.PipelineWeak) | $res |")
 }
 [IO.File]::WriteAllLines($table, $md)
 

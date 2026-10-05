@@ -88,7 +88,7 @@ try {
     # 6 measured ntrims (50 to 40), 3 full runs and one 2-core run each, plus the header.
     if ($csv.Count -ne 25) { Fail-Check "edges: expected 25 CSV lines, got $($csv.Count)" }
     $script:checks++
-    if (-not ($csv | Where-Object { $_.StartsWith('sm_89,44,2core,1,13.773,82387,164775,296595,329550,') })) {
+    if (-not ($csv | Where-Object { $_.StartsWith('sm_89,44,2core,1,2,13.773,82387,164775,296595,329550,') })) {
         Fail-Check 'edges: 2-core CSV row for 44'
     }
     $script:checks++
@@ -100,8 +100,10 @@ try {
     Expect-Row 'overflow' 44 'stop: OOPS or NODE OVERFLOW'
 
     $null = Expect-Choice -Name 'busy' -Scenario 'busy' -Chosen '40' -Extra @('-DefaultNtrims', '50')
-    Expect-Row 'busy' 36 'stop: 2-core busy 0.4500 > 0.40'
-    Expect-Row 'busy' 40 '| 35.0% / 35.0% |'
+    # The measured fraction is half the projection (a shared GPU), so only
+    # the projection reaches the limit.
+    Expect-Row 'busy' 36 'stop: 2-core projected busy 0.4500 > 0.40'
+    Expect-Row 'busy' 40 '| 17.5% | 17.5% / 35.0% | 2 | **chosen** |'
 
     $null = Expect-Choice -Name 'nogain' -Scenario 'nogain' -Chosen 'none' -Extra @('-DefaultNtrims', '50')
     Expect-Row 'nogain' 42 '| no gain |'
@@ -119,6 +121,27 @@ try {
     Expect-Row 'default48' 48 '| default |'
     Expect-Row 'default48' 50 '| -0.30% |'
 
+    # 2-core CPUs: two different physical cores (mask 5 with SMT, whose
+    # siblings Windows numbers next to each other), or -AffinityMask.
+    $topologies = @(
+        @('smt', '8,16', @(), 'affinity mask 5 (logical CPUs 0 and 2: 8 cores, 16 logical, SMT on)'),
+        @('nosmt', '4,4', @(), 'affinity mask 3 (logical CPUs 0 and 1: 4 cores, no SMT)'),
+        @('onecore', '1,2', @(), 'affinity mask 3 (CPU topology unknown'),
+        @('override', '8,16', @('-AffinityMask', '6'), 'affinity mask 6 (from -AffinityMask)')
+    )
+    foreach ($case in $topologies) {
+        $env:TARI_SWEEP_TOPOLOGY = $case[1]
+        $name = 'mask-' + $case[0]
+        $null = Expect-Choice -Name $name -Scenario 'nogain' -Chosen 'none' `
+            -Extra (@('-DefaultNtrims', '50', '-Ntrims', '50') + $case[2])
+        $script:checks++
+        $md = [IO.File]::ReadAllText((Join-Path (Join-Path $tempRoot $name) 'sweep.md'))
+        if (-not $md.Contains('- 2-core check: ' + $case[3])) {
+            Fail-Check "${name}: expected [$($case[3])]`n$md"
+        }
+    }
+    Remove-Item Env:TARI_SWEEP_TOPOLOGY
+
     Expect-Failure 'old' 'old' 'is the solver built with the ntrims statistics?' @('-DefaultNtrims', '50')
     Expect-Failure 'crash' 'crash' 'solver run failed' @('-DefaultNtrims', '50')
     Expect-Failure 'loaddies' 'loaddies' '2-core load solver exited early' @('-DefaultNtrims', '50')
@@ -131,6 +154,7 @@ try {
     Remove-Item Env:TARI_FAKE_SOLVER_SCENARIO -ErrorAction SilentlyContinue
     Remove-Item Env:TARI_FAKE_SOLVER_STATE -ErrorAction SilentlyContinue
     Remove-Item Env:TARI_ARCH_FLAGS -ErrorAction SilentlyContinue
+    Remove-Item Env:TARI_SWEEP_TOPOLOGY -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
