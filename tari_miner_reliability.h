@@ -323,4 +323,170 @@ private:
     SolverFailure failure_ = SolverFailure::None;
 };
 
+// A pool can send errors, share rejections and jobs without limit. Log at most
+// this many of each kind per window, plus one "N more not logged" line when
+// the next message arrives in a later window (a count still pending when the
+// pool goes quiet is not printed). The limits live for the whole process, so
+// reconnecting does not reset them. Each such line is under about 400 bytes
+// (pool text is capped at 256), so each kind adds at most about 4.5 KB per
+// minute, and the three together under 30 KB in any 15 s, across reconnects.
+// That keeps the latest speed report inside the last 1 MiB of the log that
+// hiveos/h-stats.sh reads. It bounds the rate, not the total: the logs still
+// grow over days and are not rotated.
+constexpr unsigned POOL_LOG_LIMIT = 10;
+constexpr double POOL_LOG_WINDOW_SEC = 60.0;
+
+// Lets at most POOL_LOG_LIMIT messages through per window and counts the
+// rest. Holds no clock: the caller passes the time in.
+class LogRateLimiter {
+public:
+    // Returns true when this message should be logged. When it starts a new
+    // window, suppressed is set to the number of messages dropped in the
+    // previous one, so the caller can report them; otherwise it is set to 0.
+    bool allow(double t_sec, uint64_t &suppressed) {
+        suppressed = 0;
+        if (!started_ || t_sec - window_start_ >= POOL_LOG_WINDOW_SEC ||
+            t_sec < window_start_) {
+            suppressed = suppressed_;
+            started_ = true;
+            window_start_ = t_sec;
+            logged_ = 0;
+            suppressed_ = 0;
+        }
+        if (logged_ < POOL_LOG_LIMIT) {
+            logged_++;
+            return true;
+        }
+        suppressed_++;
+        return false;
+    }
+
+private:
+    bool started_ = false;
+    double window_start_ = 0.0;
+    unsigned logged_ = 0;
+    uint64_t suppressed_ = 0;
+};
+
+struct PoolLogLimits {
+    LogRateLimiter error;
+    LogRateLimiter rejected;
+    LogRateLimiter job;
+};
+
+// A connection that ends cleanly sooner than this after it started is followed
+// by a pause for the rest of this time, so a pool that closes the connection
+// right after login cannot make the miner reconnect (and log a new connection)
+// more than once per SHORT_CONNECTION_SEC, and a connection that lasted almost
+// that long costs almost no wait. A normal long-lived connection that drops
+// still reconnects at once.
+constexpr double SHORT_CONNECTION_SEC = 15.0;
+
+// Seconds to wait before reconnecting after a connection that lasted
+// connection_sec. A negative or unknown duration waits the full time.
+inline double reconnect_pause_seconds(double connection_sec) {
+    if (!(connection_sec >= 0.0))
+        return SHORT_CONNECTION_SEC;
+    if (connection_sec >= SHORT_CONNECTION_SEC)
+        return 0.0;
+    return SHORT_CONNECTION_SEC - connection_sec;
+}
+
+// True when a graph trimmed for a job at work_height is no longer worth a
+// cycle search or a share, because the pool has moved on to a higher block.
+// Height 0 means the pool did not send one, so nothing is skipped. A new job
+// at the same height (a template refresh) still takes shares, and a lower
+// height (a reorg or rollback) is not treated as newer. This assumes the pool
+// rejects shares for an older height; a pool with a stale-share grace window
+// loses the few shares per block that would have been found in this work.
+inline bool is_superseded(uint64_t work_height, uint64_t latest_height) {
+    if (work_height == 0 || latest_height == 0)
+        return false;
+    return latest_height > work_height;
+}
+
+// Real blocks arrive tens of seconds apart. More height increases than this
+// in any window means the pool's heights cannot be trusted to skip work.
+constexpr unsigned HEIGHT_CHURN_LIMIT = 3;
+constexpr double HEIGHT_CHURN_WINDOW_SEC = 60.0;
+
+// Watches increases in the pool's job height. A pool (or anything in between)
+// that raises the height faster than blocks arrive could otherwise make every
+// graph look superseded, so no share would ever be sent. At most
+// HEIGHT_CHURN_LIMIT trusted increases fit in any HEIGHT_CHURN_WINDOW_SEC
+// span (a sliding window). One more trips the guard: heights stay untrusted
+// until a window has passed with no further increase. Holds no clock: the
+// caller passes the time in. Use from one thread only.
+class HeightChurnGuard {
+public:
+    // Call with the latest job height whenever it is read. Returns true when
+    // a height increase may be used to skip stale work. While tripped it
+    // returns false, and sets warn at most once per window.
+    bool observe(uint64_t height, double t_sec, bool &warn) {
+        warn = false;
+        if (t_sec < last_time_) {
+            // The clock went backwards: the stored times mean nothing now.
+            count_ = 0;
+            next_ = 0;
+            tripped_ = false;
+            warned_ = false;
+        }
+        last_time_ = t_sec;
+        bool increase = last_height_ != 0 && height > last_height_;
+        if (height != 0)
+            last_height_ = height;
+        if (increase) {
+            // times_[next_] is the oldest of the last HEIGHT_CHURN_LIMIT
+            // trusted increases once the ring is full.
+            bool full = count_ == HEIGHT_CHURN_LIMIT &&
+                        t_sec - times_[next_] < HEIGHT_CHURN_WINDOW_SEC;
+            if (full || (tripped_ && t_sec < untrusted_until_)) {
+                tripped_ = true;
+                untrusted_until_ = t_sec + HEIGHT_CHURN_WINDOW_SEC;
+            } else {
+                times_[next_] = t_sec;
+                next_ = (next_ + 1) % HEIGHT_CHURN_LIMIT;
+                if (count_ < HEIGHT_CHURN_LIMIT)
+                    count_++;
+            }
+        }
+        if (!tripped_ || t_sec >= untrusted_until_)
+            return true;
+        if (!warned_ || t_sec - last_warn_ >= HEIGHT_CHURN_WINDOW_SEC) {
+            warned_ = true;
+            last_warn_ = t_sec;
+            warn = true;
+        }
+        return false;
+    }
+
+private:
+    double times_[HEIGHT_CHURN_LIMIT] = {};
+    unsigned count_ = 0;
+    unsigned next_ = 0;
+    bool tripped_ = false;
+    double untrusted_until_ = 0.0;
+    bool warned_ = false;
+    double last_warn_ = 0.0;
+    double last_time_ = 0.0;
+    uint64_t last_height_ = 0;
+};
+
+// Whether to skip the cycle search for work launched at work_height.
+// hwm_at_launch is the highest height seen when the work was launched, and
+// trusted comes from HeightChurnGuard for latest_height. Work launched below
+// that high-water mark (the pool dipped and may restore the height before the
+// work finishes) is never skipped, so skipping always needs a new highest
+// height. Each one can skip at most the pipeline's queued graphs, and the
+// guard trusts at most HEIGHT_CHURN_LIMIT increases in any
+// HEIGHT_CHURN_WINDOW_SEC span. After a reorg to
+// a lower height nothing is skipped until the chain passes the old highest
+// height again.
+inline bool should_skip_stale(uint64_t work_height, uint64_t hwm_at_launch,
+                              uint64_t latest_height, bool trusted) {
+    if (!trusted || work_height < hwm_at_launch)
+        return false;
+    return is_superseded(work_height, latest_height);
+}
+
 } // namespace tari_miner

@@ -4,6 +4,7 @@
 #include "../tari_miner_reliability.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 
 static int failures = 0;
@@ -384,6 +385,162 @@ static void test_solver_watchdog() {
           "one failed context does not poison another");
 }
 
+static void test_log_rate_limiter() {
+    std::puts("Pool log rate limit:");
+    tari_miner::LogRateLimiter limiter;
+    uint64_t suppressed = 99;
+    unsigned logged = 0;
+    for (unsigned i = 0; i < 25; ++i) {
+        if (limiter.allow(1.0 + i, suppressed)) logged++;
+        if (suppressed) break;
+    }
+    check(logged == tari_miner::POOL_LOG_LIMIT,
+          "only the limit is logged within one window");
+    check(suppressed == 0, "nothing is reported mid-window");
+    check(limiter.allow(61.0, suppressed) && suppressed == 15,
+          "a new window logs again and reports the suppressed count");
+    check(limiter.allow(62.0, suppressed) && suppressed == 0,
+          "the suppressed count is reported once");
+    check(limiter.allow(10.0, suppressed) && suppressed == 0,
+          "a clock going backwards starts a new window");
+}
+
+static bool near(double actual, double expected) {
+    return actual > expected - 1e-9 && actual < expected + 1e-9;
+}
+
+static void test_reconnect_pause() {
+    std::puts("Reconnect pause:");
+    check(near(tari_miner::reconnect_pause_seconds(0.2), 14.8),
+          "a connection closed right after login waits out the window");
+    check(near(tari_miner::reconnect_pause_seconds(14.9), 0.1),
+          "a connection that almost lasted the window barely waits");
+    check(tari_miner::reconnect_pause_seconds(tari_miner::SHORT_CONNECTION_SEC) == 0.0,
+          "a connection that lasted the window reconnects at once");
+    check(tari_miner::reconnect_pause_seconds(3600.0) == 0.0,
+          "a long connection reconnects at once");
+    check(tari_miner::reconnect_pause_seconds(-1.0) == tari_miner::SHORT_CONNECTION_SEC,
+          "a clock going backwards waits the full window");
+    check(tari_miner::reconnect_pause_seconds(
+              std::numeric_limits<double>::quiet_NaN()) ==
+              tari_miner::SHORT_CONNECTION_SEC,
+          "an unknown duration waits the full window");
+}
+
+static void test_superseded_job() {
+    std::puts("Superseded job:");
+    check(tari_miner::is_superseded(100, 101),
+          "a job at a higher height supersedes the work");
+    check(!tari_miner::is_superseded(100, 100),
+          "a new job at the same height (template refresh) does not");
+    check(!tari_miner::is_superseded(0, 101),
+          "unknown work height is never superseded");
+    check(!tari_miner::is_superseded(100, 0),
+          "unknown latest height never supersedes");
+    check(!tari_miner::is_superseded(0, 0),
+          "both heights unknown is not superseded");
+    check(!tari_miner::is_superseded(100, 99),
+          "a lower height (reorg or rollback) does not supersede");
+}
+
+static void test_height_churn_guard() {
+    std::puts("Height churn guard:");
+    bool warn = false;
+    for (double gap : {30.0, 120.0}) {
+        // One block every gap seconds, for an hour.
+        tari_miner::HeightChurnGuard guard;
+        bool trusted = true;
+        bool warned = false;
+        for (int i = 0; i * gap <= 3600.0; ++i) {
+            trusted = trusted && guard.observe(1000 + i, gap * i, warn);
+            warned = warned || warn;
+        }
+        check(trusted && !warned, gap < 60.0 ? "a 30 s block cadence is trusted"
+                                             : "a 120 s block cadence is trusted");
+    }
+    {
+        tari_miner::HeightChurnGuard guard;
+        check(guard.observe(100, 0.0, warn), "the first height is trusted");
+        check(guard.observe(100, 0.5, warn), "an unchanged height is trusted");
+        bool trusted = true;
+        for (int i = 1; i <= 3; ++i)
+            trusted = trusted && guard.observe(100 + i, i, warn);
+        check(trusted && !warn, "up to the limit of increases is trusted");
+        check(!guard.observe(104, 4.0, warn) && warn,
+              "one more increase in the window is not trusted, with a warning");
+        check(!guard.observe(105, 5.0, warn) && !warn,
+              "later increases stay untrusted, with no second warning");
+        check(!guard.observe(105, 63.0, warn) && !warn,
+              "it stays untrusted until a window passes with no increase");
+        check(guard.observe(105, 65.0, warn) && !warn,
+              "it is trusted again once a window has passed");
+        check(guard.observe(106, 66.0, warn), "the next increase is trusted");
+
+        trusted = guard.observe(107, 67.0, warn) && guard.observe(108, 68.0, warn);
+        check(trusted, "increases up to the limit are trusted again");
+        check(!guard.observe(109, 69.0, warn) && warn,
+              "churn a window after the last warning warns again");
+        bool any_trusted = false;
+        for (int i = 1; i <= 15; ++i)
+            any_trusted = guard.observe(109 + i, 69.0 + 10.0 * i, warn) || any_trusted;
+        check(!any_trusted, "sustained churn stays untrusted without flapping");
+        check(guard.observe(300, 30.0, warn),
+              "time going backwards starts again, trusted");
+    }
+    {
+        // Three increases just before t=60 and three just after: a fixed
+        // window starting at 0 would trust all six.
+        tari_miner::HeightChurnGuard guard;
+        guard.observe(100, 0.0, warn);
+        bool trusted = guard.observe(101, 58.5, warn) &&
+                       guard.observe(102, 59.0, warn) &&
+                       guard.observe(103, 59.5, warn);
+        check(trusted, "three increases in a burst are trusted");
+        bool after = guard.observe(104, 60.5, warn) ||
+                     guard.observe(105, 61.0, warn) ||
+                     guard.observe(106, 61.5, warn);
+        check(!after, "a burst across a minute boundary is not trusted");
+    }
+    {
+        tari_miner::HeightChurnGuard guard;
+        const uint64_t huge = std::numeric_limits<uint64_t>::max();
+        check(guard.observe(100, 0.0, warn), "a normal height is trusted");
+        check(guard.observe(huge, 1.0, warn), "a single huge height counts once");
+        check(!tari_miner::is_superseded(huge, 101),
+              "work for the huge height is not superseded by a normal one");
+        check(guard.observe(101, 2.0, warn) && guard.observe(102, 30.0, warn),
+              "heights after the huge one are still trusted");
+        check(tari_miner::is_superseded(101, 102),
+              "the next real block still supersedes");
+    }
+}
+
+static void test_should_skip_stale() {
+    std::puts("Stale work skip:");
+    check(tari_miner::should_skip_stale(100, 100, 101, true),
+          "work in flight when a new block arrives is skipped");
+    check(!tari_miner::should_skip_stale(100, 100, 101, false),
+          "an untrusted height skips nothing");
+    check(!tari_miner::should_skip_stale(100, 100, 100, true),
+          "work for the current block is not skipped");
+    check(!tari_miner::should_skip_stale(99, 100, 100, true),
+          "work launched during a dip below the highest height is not skipped "
+          "when the height is restored");
+    check(!tari_miner::should_skip_stale(0, 0, 101, true) &&
+              !tari_miner::should_skip_stale(100, 100, 0, true),
+          "height 0 never skips");
+    // A reorg from 100 back to 98: work at 98 and 99 is below the old highest
+    // height, so nothing is skipped until the chain passes 100.
+    check(!tari_miner::should_skip_stale(98, 100, 99, true) &&
+              !tari_miner::should_skip_stale(99, 100, 100, true),
+          "after a reorg nothing is skipped below the old highest height");
+    check(tari_miner::should_skip_stale(101, 101, 102, true),
+          "skipping resumes once the chain passes the old highest height");
+    const uint64_t huge = std::numeric_limits<uint64_t>::max();
+    check(!tari_miner::should_skip_stale(101, huge, 102, true),
+          "a single huge height turns skipping off rather than on");
+}
+
 int main() {
     test_wallet_validation();
     test_tari_address_charset();
@@ -394,6 +551,11 @@ int main() {
     test_protocol_error_policy();
     test_login_failure_policy();
     test_solver_watchdog();
+    test_log_rate_limiter();
+    test_reconnect_pause();
+    test_superseded_job();
+    test_height_churn_guard();
+    test_should_skip_stale();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");

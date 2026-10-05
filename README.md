@@ -69,6 +69,21 @@ periodic speed report. Warnings and connection errors go to `gpu0.err.log`
 alongside it. The two streams are separate files on Windows; the Linux starter
 combines them into one.
 
+In the speed report, `speed` is the graph rate over about the last 60
+seconds and `avg` is the average since the miner started. The report keeps
+coming every 15 seconds during the waits between reconnect attempts, so time
+lost to a pool outage shows as a falling rate. It pauses while a connection
+attempt itself is blocked (an unreachable pool host can block a connect for up
+to about two minutes) and during the wait of up to 20 seconds for the first
+job after connecting. HiveOS shows 0 once the newest report is more than 90
+seconds old. `accepted` and `rejected` count shares since the miner started,
+across reconnects, and `t` is the report time in Unix seconds. `stale`
+counts graphs that were not searched for shares because the pool had already
+moved to a higher block height. Pools that still accept shares for the
+previous block for a short time may lose a few shares per block this way;
+pass `--no-stale-skip` to search and submit that work anyway (`stale` then
+stays 0).
+
 Pools that expect `wallet/worker` rather than `wallet.worker` need the login
 separator set alongside the pool:
 
@@ -138,6 +153,7 @@ Options placed after the starter command are passed to every selected GPU:
 --intensity N           Duty cycle from 1 to 100 percent; defaults to 100
 --pipeline N            Overlapped solver contexts; defaults automatically
 --max-runtime-sec N     Stop after N seconds
+--no-stale-skip         Also search and submit work for a superseded block
 --version               Print version and exit
 ```
 

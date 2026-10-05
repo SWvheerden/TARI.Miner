@@ -15,12 +15,15 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <ctime>
 #include <algorithm>
 #include <future>
 #include <memory>
 
 #include "tari_miner_pipeline.h"
 #include "tari_miner_reliability.h"
+#include "tari_miner_stats.h"
 #include "tari_pool_protocol.h"
 #include "tari_miner_worker.h"
 
@@ -334,6 +337,12 @@ static bool parse_job_line(
 
 class PoolClient {
 public:
+    // The log limits are shared by every connection, so a pool cannot reset
+    // them by reconnecting. Only one PoolClient is alive at a time and its
+    // destructor joins the reader thread, so they need no lock.
+    explicit PoolClient(tari_miner::PoolLogLimits &log_limits)
+        : log_limits_(log_limits) {}
+
     bool connect_login(const std::string &pool, const std::string &login, const std::string &pass) {
         std::string host, port;
         if (!split_host_port(pool, host, port)) {
@@ -526,13 +535,25 @@ private:
         }
         if (response == tari_miner::PoolResponseKind::ShareRejected) {
             rejected_.fetch_add(1);
-            std::string safe = tari_pool::sanitize_for_terminal(line);
-            printf("share rejected: %s\n", safe.c_str());
+            uint64_t suppressed = 0;
+            bool log = log_limits_.rejected.allow(now_sec(), suppressed);
+            if (suppressed)
+                printf("share rejected: %llu more not logged\n", (unsigned long long)suppressed);
+            if (log) {
+                std::string safe = tari_pool::sanitize_for_terminal(line);
+                printf("share rejected: %s\n", safe.c_str());
+            }
             return;
         }
         if (response == tari_miner::PoolResponseKind::OtherError) {
-            std::string safe = tari_pool::sanitize_for_terminal(line);
-            printf("pool error: %s\n", safe.c_str());
+            uint64_t suppressed = 0;
+            bool log = log_limits_.error.allow(now_sec(), suppressed);
+            if (suppressed)
+                printf("pool error: %llu more not logged\n", (unsigned long long)suppressed);
+            if (log) {
+                std::string safe = tari_pool::sanitize_for_terminal(line);
+                printf("pool error: %s\n", safe.c_str());
+            }
             return;
         }
 
@@ -548,11 +569,22 @@ private:
         bool invalid_target = false;
         if (parse_job_line(line, job_, parsed, &invalid_target)) {
             job_ = parsed;
-            std::string safe_job_id = tari_pool::sanitize_for_terminal(job_.job_id);
-            std::string safe_xn = tari_pool::sanitize_for_terminal(job_.xn_hex);
-            printf("new job height=%llu id=%s diff=%llu xn=%s\n",
-                   (unsigned long long)job_.height, safe_job_id.c_str(),
-                   (unsigned long long)job_.target_diff, safe_xn.c_str());
+            uint64_t suppressed = 0;
+            bool log = log_limits_.job.allow(now_sec(), suppressed);
+            if (suppressed)
+                printf("new job: %llu more not logged\n", (unsigned long long)suppressed);
+            if (log) {
+                std::string safe_job_id = tari_pool::sanitize_for_terminal(job_.job_id);
+                // nonce_prefix_base only uses an even-length hex xn of up to
+                // 8 bytes; anything else is not printed.
+                bool xn_ok = job_.xn_hex.size() % 2 == 0 && job_.xn_hex.size() <= 16;
+                for (char c : job_.xn_hex)
+                    if (hexval(c) < 0) xn_ok = false;
+                printf("new job height=%llu id=%s xn=%s diff=%llu\n",
+                       (unsigned long long)job_.height, safe_job_id.c_str(),
+                       xn_ok ? job_.xn_hex.c_str() : "<invalid>",
+                       (unsigned long long)job_.target_diff);
+            }
         } else if (invalid_target) {
             fprintf(stderr, "invalid pool target; disconnecting\n");
             protocol_error_.store(true);
@@ -572,6 +604,8 @@ private:
     std::atomic<bool> protocol_error_{false};
     std::atomic<uint64_t> accepted_{0};
     std::atomic<uint64_t> rejected_{0};
+    // Only touched by the reader thread.
+    tari_miner::PoolLogLimits &log_limits_;
 };
 
 struct Options {
@@ -587,6 +621,8 @@ struct Options {
     int pipeline = 2;
     bool pipeline_set = false;
     int max_runtime_sec = 0;
+    // Skip the cycle search for graphs of a block the pool has moved past.
+    bool stale_skip = true;
     int ntrims = -1;
     int gena_blocks = -1;
     int gena_tpb = -1;
@@ -620,6 +656,7 @@ static void usage() {
            "  --device N              default 0\n"
            "  --pipeline N            solver contexts to overlap GPU trim and CPU cycle search, default auto\n"
            "  --max-runtime-sec N     stop after N seconds (test helper)\n"
+           "  --no-stale-skip         also search and submit work for a superseded block\n"
            "  --version               print version and exit\n"
            "tuning:\n"
            "  --ntrims N              even trim-round count, build default\n"
@@ -649,6 +686,7 @@ static bool parse_args(int argc, char **argv, Options &o) {
         else if (!strcmp(argv[i], "--intensity")) { char *v = need(argv[i]); if (!v) return false; o.intensity = atoi(v); }
         else if (!strcmp(argv[i], "--device")) { char *v = need(argv[i]); if (!v) return false; o.device = atoi(v); }
         else if (!strcmp(argv[i], "--pipeline")) { char *v = need(argv[i]); if (!v) return false; o.pipeline = atoi(v); o.pipeline_set = true; }
+        else if (!strcmp(argv[i], "--no-stale-skip")) { o.stale_skip = false; }
         else if (!strcmp(argv[i], "--max-runtime-sec")) { char *v = need(argv[i]); if (!v) return false; o.max_runtime_sec = atoi(v); }
         else if (!strcmp(argv[i], "--ntrims")) { char *v = need(argv[i]); if (!v) return false; o.ntrims = atoi(v); }
         else if (!strcmp(argv[i], "--gena-blocks")) { char *v = need(argv[i]); if (!v) return false; o.gena_blocks = atoi(v); }
@@ -710,6 +748,9 @@ int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
 #else
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    // A send on a socket the pool has reset must fail with an error that the
+    // submit path handles, not kill the miner with SIGPIPE.
+    signal(SIGPIPE, SIG_IGN);
 #endif
 
     Options opt;
@@ -800,6 +841,15 @@ int main(int argc, char **argv) {
     }
 
     uint64_t graphs = 0, cycles = 0, submitted = 0, verify_failures = 0;
+    // Trimmed graphs not searched because the pool moved to a higher block.
+    uint64_t stale_skipped = 0;
+    tari_miner::HeightChurnGuard height_guard;
+    // Highest job height the main loop has seen. Kept across reconnects:
+    // resetting it would let a pool dip the height for a launch and restore
+    // it before the graph finishes, since the guard does not see launch-time
+    // heights.
+    uint64_t height_hwm = 0;
+    bool hwm_hold_logged = false;
     int exit_code = 0;
     tari_miner::LoginFailurePolicy login_failures;
     tari_miner::PoolSilencePolicy pool_silence;
@@ -807,6 +857,44 @@ int main(int argc, char **argv) {
     std::vector<tari_miner::SolverWatchdog> solver_watchdogs(contexts.size());
     double start = now_sec();
     double last_report = start;
+    // Outside the reconnect loop so a disconnected period shows as a lower
+    // rolling rate instead of being forgotten.
+    tari_miner::SpeedMeter speed_meter;
+    // Share counts from earlier connections. Each PoolClient counts from zero,
+    // so these keep the reported totals from resetting on reconnect.
+    uint64_t accepted_before = 0, rejected_before = 0;
+    tari_miner::PoolLogLimits pool_log_limits;
+
+    // Prints the speed report when one is due. Also called in the waits between
+    // reconnect attempts so the rolling rate falls during an outage. Nothing is
+    // printed while a connection attempt itself is blocked.
+    auto report_speed_with = [&](uint64_t accepted, uint64_t rejected) {
+        double t = now_sec();
+        if (t - last_report < tari_miner::SPEED_REPORT_INTERVAL_SEC)
+            return;
+        speed_meter.sample(t, graphs);
+        double lifetime = tari_miner::average_rate(graphs, t - start);
+        // The first report has no earlier sample to measure from.
+        double rolling = speed_meter.size() < 2
+            ? lifetime
+            : speed_meter.rolling_rate(tari_miner::SPEED_WINDOW_SEC);
+        printf("%s\n", tari_miner::format_speed_line(
+            rolling, lifetime, graphs, cycles, submitted, accepted, rejected,
+            (int64_t)std::time(nullptr), stale_skipped).c_str());
+        last_report = t;
+    };
+
+    // Sleeps between connection attempts, still printing speed reports.
+    auto reconnect_wait = [&](double seconds) {
+        double deadline = now_sec() + seconds;
+        while (true) {
+            report_speed_with(accepted_before, rejected_before);
+            double remaining = deadline - now_sec();
+            if (remaining <= 0.0) break;
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(std::min(remaining, 1.0)));
+        }
+    };
 
     auto observe_trim = [&](int context, const SolverTrimResult &trim) {
         tari_miner::SolverWatchdog &watchdog = solver_watchdogs[(size_t)context];
@@ -843,12 +931,13 @@ int main(int argc, char **argv) {
         std::string login = opt.wallet + opt.login_separator + opt.worker;
         printf("connecting to %s as %s\n", opt.pool.c_str(), login.c_str());
 
-        PoolClient pool;
+        double connected_at = now_sec();
+        PoolClient pool(pool_log_limits);
         if (!pool.connect_login(opt.pool, login, opt.pass)) {
             pool_silence.reset();
             protocol_errors.reset();
             fprintf(stderr, "pool connection/login send failed; retrying in 5s\n");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            reconnect_wait(5);
             continue;
         }
 
@@ -873,8 +962,7 @@ int main(int argc, char **argv) {
                         "pool login rejected (%u/%u); retrying in 5s\n",
                         login_failures.consecutive_failures(),
                         tari_miner::MAX_LOGIN_FAILURES);
-                std::this_thread::sleep_for(
-                    std::chrono::seconds(tari_miner::LOGIN_RETRY_SECONDS));
+                reconnect_wait(tari_miner::LOGIN_RETRY_SECONDS);
                 continue;
             }
             pool.stop();
@@ -896,20 +984,20 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "no job received (%u/%u); reconnecting in %us\n",
                         pool_silence.consecutive_silences(),
                         tari_miner::MAX_SILENT_CYCLES, backoff);
-                std::this_thread::sleep_for(std::chrono::seconds(backoff));
+                reconnect_wait(backoff);
                 continue;
             }
             pool_silence.reset();
             if (wait_outcome == tari_miner::JobWaitOutcome::ProtocolError) {
                 if (record_protocol_error())
                     break;
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                reconnect_wait(5);
                 continue;
             }
             protocol_errors.reset();
             fprintf(stderr,
                     "pool disconnected before the first valid job; retrying in 5s\n");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            reconnect_wait(5);
             continue;
         }
         login_failures.record_success();
@@ -957,16 +1045,45 @@ int main(int argc, char **argv) {
             }
         };
 
-        auto report_speed = [&]() {
-            double t = now_sec();
-            if (t - last_report >= 15.0) {
-                double gsec = graphs / (t - start);
-                printf("speed %.2f g/s | graphs=%llu cycles=%llu submitted=%llu accepted=%llu rejected=%llu\n",
-                       gsec, (unsigned long long)graphs, (unsigned long long)cycles,
-                       (unsigned long long)submitted, (unsigned long long)pool.accepted(),
-                       (unsigned long long)pool.rejected());
-                last_report = t;
+        // Says whether the latest job height can be used to skip stale work.
+        // A height that keeps rising faster than blocks arrive is ignored, so
+        // it cannot stop every share.
+        auto height_trusted = [&](uint64_t latest_height) -> bool {
+            bool warn = false;
+            bool trusted = height_guard.observe(latest_height, now_sec(), warn);
+            if (warn)
+                fprintf(stderr,
+                        "pool height changing too fast (more than %u increases in %.0fs); "
+                        "not skipping stale work\n",
+                        tari_miner::HEIGHT_CHURN_LIMIT, tari_miner::HEIGHT_CHURN_WINDOW_SEC);
+            return trusted;
+        };
+
+        // Whether to skip the cycle search for work launched at work_height.
+        // Says once per run when only the high-water mark held the skip back,
+        // so a mark pinned by a reorg or a bogus height is visible.
+        auto skip_stale = [&](uint64_t work_height, uint64_t hwm_at_launch) -> bool {
+            if (!opt.stale_skip)
+                return false;
+            uint64_t latest_height = pool.current_job().height;
+            height_hwm = std::max(height_hwm, latest_height);
+            bool trusted = height_trusted(latest_height);
+            bool skip = tari_miner::should_skip_stale(
+                work_height, hwm_at_launch, latest_height, trusted);
+            if (!skip && trusted && !hwm_hold_logged &&
+                tari_miner::is_superseded(work_height, latest_height)) {
+                hwm_hold_logged = true;
+                fprintf(stderr,
+                        "stale skip paused: pool height %llu is below the highest seen "
+                        "height %llu (reorg, pool switch or bogus height); searching all work\n",
+                        (unsigned long long)work_height, (unsigned long long)hwm_at_launch);
             }
+            return skip;
+        };
+
+        auto report_speed = [&]() {
+            report_speed_with(accepted_before + pool.accepted(),
+                              rejected_before + pool.rejected());
         };
 
         // Duty-cycle throttle. Sleeps in proportion to the time worked since the
@@ -1014,6 +1131,8 @@ int main(int argc, char **argv) {
                 counter = ((uint64_t)(now_sec() * 1000000.0)) & mask;
             }
 
+            height_hwm = std::max(height_hwm, job.height);
+            uint64_t hwm_at_launch = height_hwm;
             uint64_t nonce = base | (counter++ & mask);
             inject_keys(ctx, nonce, job);
 
@@ -1022,7 +1141,12 @@ int main(int argc, char **argv) {
                 graphs++;
             if (!observe_trim(0, trim))
                 break;
-            if (trim.nedges) {
+            // Shares for a block the pool has moved past would be rejected
+            // as stale, so skip the cycle search for them.
+            bool superseded = skip_stale(job.height, hwm_at_launch);
+            if (superseded)
+                stale_skipped++;
+            if (trim.nedges && !superseded) {
                 int cycle_rc = ctx->findcycles_copied_status(trim.nedges);
                 if (cycle_rc != cudaSuccess) {
                     report_cuda_failure(
@@ -1032,7 +1156,8 @@ int main(int argc, char **argv) {
                     break;
                 }
             }
-            consume_solutions(ctx, job, nonce);
+            if (!superseded)
+                consume_solutions(ctx, job, nonce);
             report_speed();
             throttle();
         } else {
@@ -1040,6 +1165,7 @@ int main(int argc, char **argv) {
                 std::future<SolverTrimResult> future;
                 Job job;
                 uint64_t nonce = 0;
+                uint64_t hwm_at_launch = 0;
                 bool active = false;
             };
             std::vector<PendingTrim> pending((size_t)opt.pipeline);
@@ -1060,8 +1186,10 @@ int main(int argc, char **argv) {
                 uint64_t nonce = base | (counter++ & mask);
                 SolverCtx *slot_ctx = contexts[(size_t)slot];
                 inject_keys(slot_ctx, nonce, launch_job);
+                height_hwm = std::max(height_hwm, launch_job.height);
                 pending[(size_t)slot].job = launch_job;
                 pending[(size_t)slot].nonce = nonce;
+                pending[(size_t)slot].hwm_at_launch = height_hwm;
                 pending[(size_t)slot].active = true;
                 pending[(size_t)slot].future = workers[(size_t)slot]->submit([slot_ctx, device = opt.device]() {
                     return slot_ctx->trim_copy_checked(device);
@@ -1114,7 +1242,13 @@ int main(int argc, char **argv) {
                     graphs++;
                 if (!observe_trim(slot, trim))
                     break;
-                if (trim.nedges) {
+                // A trim queued before the pool moved to a higher block is not
+                // worth a cycle search: its shares would be rejected as stale.
+                bool superseded = skip_stale(pending[(size_t)slot].job.height,
+                                             pending[(size_t)slot].hwm_at_launch);
+                if (superseded)
+                    stale_skipped++;
+                if (trim.nedges && !superseded) {
                     int cycle_rc = slot_ctx->findcycles_copied_status(trim.nedges);
                     if (cycle_rc != cudaSuccess) {
                         report_cuda_failure(
@@ -1124,7 +1258,8 @@ int main(int argc, char **argv) {
                         break;
                     }
                 }
-                consume_solutions(slot_ctx, pending[(size_t)slot].job, pending[(size_t)slot].nonce);
+                if (!superseded)
+                    consume_solutions(slot_ctx, pending[(size_t)slot].job, pending[(size_t)slot].nonce);
                 done++;
                 launch_trim(slot);
                 report_speed();
@@ -1133,6 +1268,8 @@ int main(int argc, char **argv) {
             }
             drain_pending();
         }
+        accepted_before += pool.accepted();
+        rejected_before += pool.rejected();
         if (exit_code)
             break;
         if (pool.protocol_error()) {
@@ -1144,12 +1281,19 @@ int main(int argc, char **argv) {
             protocol_errors.record_valid_job(pool.current_job().seq);
             if (record_protocol_error())
                 break;
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            reconnect_wait(5);
             continue;
         }
         // A connection that ends without malformed data also breaks the
         // protocol-error streak.
         protocol_errors.reset();
+        // A pool that keeps closing the connection soon after login must not
+        // make the miner reconnect in a tight loop.
+        bool out_of_time = opt.max_runtime_sec > 0 &&
+                           now_sec() - start >= opt.max_runtime_sec;
+        double pause = tari_miner::reconnect_pause_seconds(now_sec() - connected_at);
+        if (!out_of_time && pause > 0.0)
+            reconnect_wait(pause);
     }
 
     double elapsed = now_sec() - start;

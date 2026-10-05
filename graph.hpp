@@ -35,6 +35,7 @@ public:
   word_t *ufsize;
 #endif
   bool sharedmem;
+  bool cleared; // set once adjlist (and ufparent) have had a full clear
   compressor<word_t> *compressu;
   compressor<word_t> *compressv;
   bitmap<u32> visited;
@@ -56,7 +57,12 @@ public:
     sharedmem = false;
     sols    = new proof[MAXSOLS+1]; // extra one for current path
     visited.clear();
+    cleared = false;
   }
+
+  // Owns heap memory (and the compressors), so copies would double-free.
+  graph(const graph &) = delete;
+  graph &operator=(const graph &) = delete;
 
   ~graph() {
     if (!sharedmem) {
@@ -67,6 +73,8 @@ public:
     delete[] ufparent;
     delete[] ufsize;
 #endif
+    delete compressu;
+    delete compressv;
     delete[] sols;
   }
 
@@ -83,8 +91,9 @@ public:
     compressu = new compressor<word_t>(EDGEBITS, compressbits);
     compressv = new compressor<word_t>(EDGEBITS, compressbits);
     sharedmem = false;
-    sols    = new  proof[MAXSOLS];
+    sols    = new  proof[MAXSOLS+1]; // extra one for current path
     visited.clear();
+    cleared = false;
   }
 
   graph(word_t maxedges, word_t maxnodes, u32 maxsols, char *bytes) : visited(2*maxnodes) {
@@ -99,8 +108,9 @@ public:
 #endif
     compressu = compressv = 0;
     sharedmem = true;
-    sols    = new  proof[MAXSOLS];
+    sols    = new  proof[MAXSOLS+1]; // extra one for current path
     visited.clear();
+    cleared = false;
   }
 
   graph(word_t maxedges, word_t maxnodes, u32 maxsols, u32 compressbits, char *bytes) : visited(2*maxnodes) {
@@ -116,8 +126,9 @@ public:
     compressu = new compressor<word_t>(EDGEBITS, compressbits, bytes += (sizeof(link)*(size_t)(2*MAXEDGES)));
     compressv = new compressor<word_t>(EDGEBITS, compressbits, bytes + compressu->bytes());
     sharedmem = true;
-    sols    = new  proof[MAXSOLS];
+    sols    = new  proof[MAXSOLS+1]; // extra one for current path
     visited.clear();
+    cleared = false;
   }
 
   // total size of new-operated data, excludes sols and visited bitmap of MAXEDGES bits
@@ -125,7 +136,31 @@ public:
     return (sizeof(word_t)*(size_t)(2*MAXNODES)) + (sizeof(link)*(size_t)(2*MAXEDGES)) + (compressu ? 2 * compressu->bytes() : 0);
   }
 
+  // With compression, ids are dense, so the previous graph only touched
+  // adjlist (and ufparent) at [0, compressu->nnodes) and
+  // [MAXNODES, MAXNODES + compressv->nnodes). Clear just those, and the
+  // compressor slots in use. This relies on edges being added only through
+  // add_compress_edge() between resets (add_edge asserts it), so a graph on
+  // shared memory, which others may write between resets, always clears in
+  // full.
   void reset() {
+    if (!cleared || !compressu || sharedmem ||
+        compressu->nnodes > MAXNODES || compressv->nnodes > MAXNODES) {
+      reset_full();
+      return;
+    }
+    memset(adjlist, (char)NIL, (sizeof(word_t)*(size_t)compressu->nnodes));
+    memset(adjlist + MAXNODES, (char)NIL, (sizeof(word_t)*(size_t)compressv->nnodes));
+#if GRAPH_UNION_SKIP
+    memset(ufparent, (char)NIL, (sizeof(word_t)*(size_t)compressu->nnodes));
+    memset(ufparent + MAXNODES, (char)NIL, (sizeof(word_t)*(size_t)compressv->nnodes));
+#endif
+    compressu->reset_sparse();
+    compressv->reset_sparse();
+    resetcounts();
+  }
+
+  void reset_full() {
     memset(adjlist, (char)NIL, (sizeof(word_t)*(size_t)(2*MAXNODES)));
 #if GRAPH_UNION_SKIP
     memset(ufparent, (char)NIL, (sizeof(word_t)*(size_t)(2*MAXNODES)));
@@ -134,6 +169,7 @@ public:
       compressu->reset();
       compressv->reset();
     }
+    cleared = true;
     resetcounts();
   }
 
@@ -211,8 +247,15 @@ public:
   }
 
   void add_edge(word_t u, word_t v) {
-    assert(u < MAXNODES);
-    assert(v < MAXNODES);
+    // reset() only clears ids the compressors handed out. An id outside them,
+    // or outside the graph, is an error; with asserts compiled out the edge is
+    // dropped and the next reset() clears in full.
+    if (u >= MAXNODES || v >= MAXNODES ||
+        (compressu && (u >= compressu->nnodes || v >= compressv->nnodes))) {
+      cleared = false;
+      assert(!"add_edge: node id out of range");
+      return;
+    }
     v += MAXNODES; // distinguish partitions
 #if GRAPH_UNION_SKIP
     bool maybeCycle = ufparent[u] != NIL && ufparent[v] != NIL && uf_find(u) == uf_find(v);
