@@ -41,6 +41,13 @@ showed the average since start), so it drops while the pool is unreachable.
 A GPU whose log has had no speed report for 90 seconds shows 0.
 It does not change clocks, voltage, fans, or power limits.
 
+Because of this, the HiveOS low-hashrate watchdog sees a pool outage within
+about 60-90 seconds. Prefer a miner restart, or a longer delay, over a rig
+reboot in its settings, so a short pool outage does not reboot the rig.
+
+Accepted and rejected shares are the pool's own replies to submitted shares.
+They are not proof of payout; check the pool's dashboard for that.
+
 Manual reinstall on a rig
 -------------------------
 /hive/miners/custom/custom-get \

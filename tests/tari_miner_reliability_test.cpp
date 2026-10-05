@@ -384,6 +384,26 @@ static void test_solver_watchdog() {
           "one failed context does not poison another");
 }
 
+static void test_log_rate_limiter() {
+    std::puts("Pool log rate limit:");
+    tari_miner::LogRateLimiter limiter;
+    uint64_t suppressed = 99;
+    unsigned logged = 0;
+    for (unsigned i = 0; i < 25; ++i) {
+        if (limiter.allow(1.0 + i, suppressed)) logged++;
+        if (suppressed) break;
+    }
+    check(logged == tari_miner::POOL_LOG_LIMIT,
+          "only the limit is logged within one window");
+    check(suppressed == 0, "nothing is reported mid-window");
+    check(limiter.allow(61.0, suppressed) && suppressed == 15,
+          "a new window logs again and reports the suppressed count");
+    check(limiter.allow(62.0, suppressed) && suppressed == 0,
+          "the suppressed count is reported once");
+    check(limiter.allow(10.0, suppressed) && suppressed == 0,
+          "a clock going backwards starts a new window");
+}
+
 int main() {
     test_wallet_validation();
     test_tari_address_charset();
@@ -394,6 +414,7 @@ int main() {
     test_protocol_error_policy();
     test_login_failure_policy();
     test_solver_watchdog();
+    test_log_rate_limiter();
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL PASSED" : "FAILED",
                 failures, failures == 1 ? "" : "s");

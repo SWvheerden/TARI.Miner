@@ -323,4 +323,41 @@ private:
     SolverFailure failure_ = SolverFailure::None;
 };
 
+// A pool can send error lines without limit. Log at most this many of each
+// kind per window so a hostile pool cannot fill the log disk.
+constexpr unsigned POOL_LOG_LIMIT = 10;
+constexpr double POOL_LOG_WINDOW_SEC = 60.0;
+
+// Lets at most POOL_LOG_LIMIT messages through per window and counts the
+// rest. Holds no clock: the caller passes the time in.
+class LogRateLimiter {
+public:
+    // Returns true when this message should be logged. When it starts a new
+    // window, suppressed is set to the number of messages dropped in the
+    // previous one, so the caller can report them; otherwise it is set to 0.
+    bool allow(double t_sec, uint64_t &suppressed) {
+        suppressed = 0;
+        if (!started_ || t_sec - window_start_ >= POOL_LOG_WINDOW_SEC ||
+            t_sec < window_start_) {
+            suppressed = suppressed_;
+            started_ = true;
+            window_start_ = t_sec;
+            logged_ = 0;
+            suppressed_ = 0;
+        }
+        if (logged_ < POOL_LOG_LIMIT) {
+            logged_++;
+            return true;
+        }
+        suppressed_++;
+        return false;
+    }
+
+private:
+    bool started_ = false;
+    double window_start_ = 0.0;
+    unsigned logged_ = 0;
+    uint64_t suppressed_ = 0;
+};
+
 } // namespace tari_miner

@@ -86,7 +86,8 @@ inline double average_rate(uint64_t graphs, double elapsed_sec) {
 // The periodic report line, without the trailing newline. unix_time is the
 // wall-clock time of the report, so hiveos/h-stats.sh can tell a fresh line
 // from an old one. h-stats.sh only accepts a line in exactly this format and
-// reads its fields by position, so add any new field as key=number after t=.
+// reads its fields by position. Add any new field after t=, and add it to the
+// short list of trailing fields h-stats.sh accepts (currently only stale=).
 // tests/fixtures/speed_line.txt holds a sample shared by both tests.
 inline std::string format_speed_line(
     double rolling,

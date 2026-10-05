@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Feeds pool miner speed lines through hiveos/h-stats.sh and checks that it
 # reports the rolling rate and the accepted/rejected counters, and that pool
-# text or stale lines cannot change them.
+# text or stale lines cannot change them. Set AWK=mawk or AWK=gawk to run
+# h-stats.sh with that awk.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,6 +15,11 @@ cat > "$TEMP_ROOT/bin/nvidia-smi" <<'EOF'
 printf '0, 8.9, 00000000:01:00.0, 61, 45\n'
 EOF
 chmod +x "$TEMP_ROOT/bin/nvidia-smi"
+if [[ -n "${AWK:-}" ]]; then
+    awk_path="$(command -v "$AWK")" || { echo "awk not found: $AWK" >&2; exit 1; }
+    ln -s "$awk_path" "$TEMP_ROOT/bin/awk"
+    echo "using $awk_path"
+fi
 : > "$TEMP_ROOT/miner.env"
 
 now="$(date +%s)"
@@ -66,10 +72,35 @@ check "miner fixture" '"hs":[13.650]' '"ar":[2,1]' <<EOF
 $fixture
 EOF
 
-# Fields added after t= (such as stale=) must not break parsing.
+# The stale= field from a later miner must not break parsing.
 check "trailing field" '"hs":[13.650]' '"ar":[2,1]' <<EOF
 $fixture stale=0
 EOF
+
+# Any other trailing field is rejected, such as the tail of a split
+# "new job ... diff=<n> xn=<hex>" line.
+check "unknown trailing fields" '"hs":[0.000]' '"ar":[0,0]' <<EOF
+$fixture diff=5 xn=0123
+EOF
+
+# A report far in the future (clock stepped back, or forged) is not fresh.
+check "future report" '"hs":[0.000]' '"ar":[2,1]' <<EOF
+${fixture% t=*} t=$((now + 3600))
+EOF
+
+# Only the tail of a flooded log is read: junk before the report is skipped,
+# and the latest report is still found under bounded junk after it.
+{
+    for ((i = 0; i < 20000; i++)); do
+        echo "pool error: {\"id\":$i,\"error\":\"padding padding padding padding padding padding padding padding\"}"
+    done
+    echo "${fixture/13.65 g\/s/9.00 g\/s}"
+    echo "$fixture"
+    for ((i = 0; i < 5000; i++)); do
+        echo "pool error: {\"id\":$i,\"error\":\"padding padding padding padding padding padding padding padding\"}"
+    done
+} > "$TEMP_ROOT/flood.log"
+check "flooded log" '"hs":[13.650]' '"ar":[2,1]' < "$TEMP_ROOT/flood.log"
 
 # A report older than 90 s means the miner stopped reporting; the counters
 # are still the last known ones.

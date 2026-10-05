@@ -129,8 +129,13 @@ jobs:
       - name: Run shell launcher regressions
         run: bash tests/start_c29_launcher_test.sh
 
+      # HiveOS uses mawk as awk; also check gawk.
       - name: Run HiveOS stats parse regressions
-        run: bash tests/hiveos_stats_test.sh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mawk gawk
+          AWK=mawk bash tests/hiveos_stats_test.sh
+          AWK=gawk bash tests/hiveos_stats_test.sh
 
       - name: Run build flag reader regressions
         run: bash tests/build_flags_test.sh

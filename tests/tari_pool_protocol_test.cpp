@@ -53,6 +53,9 @@ static void test_terminal_sanitizing() {
           "C0 and C1 control characters cannot reach the terminal");
     check(tari_pool::sanitize_for_terminal("abcdef", 4) == "abcd...",
           "server text is truncated to the requested limit");
+    check(tari_pool::sanitize_for_terminal(std::string(5000, 'x')).size() ==
+              tari_pool::MAX_TERMINAL_TEXT + 3,
+          "long pool text is capped by default");
     check(tari_pool::sanitize_for_terminal("plain text") == "plain text",
           "ordinary text is unchanged");
 }

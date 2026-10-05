@@ -14,7 +14,10 @@
 namespace tari_pool {
 
 constexpr size_t MAX_LINE_BYTES = 1u << 20;
-constexpr size_t MAX_TERMINAL_TEXT = 4096;
+// Pool text is logged inside one line. Keep it well under the 4096-byte stdio
+// buffer so the line is written in one piece and cannot be split into a line
+// that starts with miner output such as the speed report.
+constexpr size_t MAX_TERMINAL_TEXT = 256;
 
 inline int hex_value(char c) {
     if (c >= '0' && c <= '9') return c - '0';

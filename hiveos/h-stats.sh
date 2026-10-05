@@ -60,13 +60,16 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
     gpu_accepted=0
     gpu_rejected=0
     if [[ -f "$log_file" && $((now - $(stat -c %Y "$log_file" 2>/dev/null || echo 0))) -le 180 ]]; then
-        # Only a whole line in the miner's own report format counts. Pool text
-        # is always logged after a prefix such as "pool error:", so it cannot
-        # forge one. Fields are read by position; later key=number fields after
-        # t= are allowed. Over-long numbers are ignored, and a report older than
-        # 90 s means the miner has stopped reporting, so the rate drops to 0.
-        read -r rate gpu_accepted gpu_rejected < <(LC_ALL=C awk -v now="$now" '
-            /^speed [0-9]+\.[0-9]+ g\/s \| avg [0-9]+\.[0-9]+ g\/s \| graphs=[0-9]+ cycles=[0-9]+ submitted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ t=[0-9]+( [a-z_]+=[0-9]+)*$/ {
+        # Only a whole line in the miner's own report format counts, and the
+        # fields are read by position. The miner logs pool text after a prefix
+        # such as "pool error:" and caps it well below the stdio buffer size, so
+        # pool text should never be written as a line of its own. The only
+        # field allowed after t= is stale=. Over-long numbers are ignored. A
+        # report more than 90 s old, or more than 30 s in the future, means the
+        # miner is not reporting, so the rate drops to 0. Only the last 1 MiB
+        # of the log is read, so a flooded log stays cheap to parse.
+        read -r rate gpu_accepted gpu_rejected < <(tail -c 1048576 "$log_file" | LC_ALL=C awk -v now="$now" '
+            /^speed [0-9]+\.[0-9]+ g\/s \| avg [0-9]+\.[0-9]+ g\/s \| graphs=[0-9]+ cycles=[0-9]+ submitted=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ t=[0-9]+( stale=[0-9]+)?$/ {
                 a = substr($12, 10)
                 r = substr($13, 10)
                 t = substr($14, 3)
@@ -77,10 +80,10 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
                 seen = t
             }
             END {
-                if (seen == "" || now - seen > 90) rate = 0
+                if (seen == "" || now - seen > 90 || seen - now > 30) rate = 0
                 printf "%.3f %.0f %.0f\n", rate + 0, accepted + 0, rejected + 0
             }
-        ' "$log_file")
+        ')
     fi
 
     bus="${bus#*:}"

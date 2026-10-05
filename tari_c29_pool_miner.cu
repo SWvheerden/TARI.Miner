@@ -528,13 +528,25 @@ private:
         }
         if (response == tari_miner::PoolResponseKind::ShareRejected) {
             rejected_.fetch_add(1);
-            std::string safe = tari_pool::sanitize_for_terminal(line);
-            printf("share rejected: %s\n", safe.c_str());
+            uint64_t suppressed = 0;
+            bool log = reject_log_limit_.allow(now_sec(), suppressed);
+            if (suppressed)
+                printf("share rejected: %llu more not logged\n", (unsigned long long)suppressed);
+            if (log) {
+                std::string safe = tari_pool::sanitize_for_terminal(line);
+                printf("share rejected: %s\n", safe.c_str());
+            }
             return;
         }
         if (response == tari_miner::PoolResponseKind::OtherError) {
-            std::string safe = tari_pool::sanitize_for_terminal(line);
-            printf("pool error: %s\n", safe.c_str());
+            uint64_t suppressed = 0;
+            bool log = error_log_limit_.allow(now_sec(), suppressed);
+            if (suppressed)
+                printf("pool error: %llu more not logged\n", (unsigned long long)suppressed);
+            if (log) {
+                std::string safe = tari_pool::sanitize_for_terminal(line);
+                printf("pool error: %s\n", safe.c_str());
+            }
             return;
         }
 
@@ -574,6 +586,9 @@ private:
     std::atomic<bool> protocol_error_{false};
     std::atomic<uint64_t> accepted_{0};
     std::atomic<uint64_t> rejected_{0};
+    // Only touched by the reader thread.
+    tari_miner::LogRateLimiter reject_log_limit_;
+    tari_miner::LogRateLimiter error_log_limit_;
 };
 
 struct Options {
