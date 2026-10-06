@@ -51,6 +51,9 @@ jobs:
             "-DLATE_ROUND_BPB=8 -DSKIP_LATE_NULL_CHECKS=0 -DROUND_LATE_TPB=1024 -DTRIM_STAGE_TIMING=1"
             "-DLATE_ROUND_SELF_ZERO_IDX=1 -DTRIM_CUDA_GRAPH=1 -DLATE_ROUND_BPB=4 -DFUSE_FINAL_TAIL_CURRENT=1 -DTRIM_STAGE_TIMING=1"
             "-DLATE_ROUND_SELF_ZERO_IDX=1 -DTRIM_CUDA_GRAPH=1 -DLATE_ROUND_BPB=8 -DFUSE_FINAL_TAIL_CURRENT=0 -DSKIP_LATE_NULL_CHECKS=0 -DRECOVERY_SMALL_OUTPUT=0"
+            "-DSEEDA_CHECKPOINT=8"
+            "-DSEEDA_CHECKPOINT=16 -DTRIM_STAGE_TIMING=1"
+            "-DSEEDA_CHECKPOINT=32"
           )
           for flags in "${flag_sets[@]}"; do
             echo "::group::solver sm_89: $flags"
@@ -59,6 +62,9 @@ jobs:
           done
           echo "::group::pool miner sm_89: all experimental trim options"
           TARI_ARCH_FLAGS="-DLATE_ROUND_SELF_ZERO_IDX=1 -DTRIM_CUDA_GRAPH=1 -DLATE_ROUND_BPB=4" ./build_pool_miner.sh sm_89
+          echo "::endgroup::"
+          echo "::group::pool miner sm_89: checkpointed SeedA"
+          TARI_ARCH_FLAGS="-DSEEDA_CHECKPOINT=16" ./build_pool_miner.sh sm_89
           echo "::endgroup::"
 
   linux:
@@ -113,6 +119,13 @@ jobs:
             tests/tari_graph_test
           done
 
+      - name: Build and run SeedA schedule regressions
+        run: |
+          g++ -std=c++17 -O2 -I. \
+            tests/tari_seeda_schedule_test.cpp \
+            -o tests/tari_seeda_schedule_test
+          tests/tari_seeda_schedule_test
+
       - name: Run GPU recall verifier fixtures
         run: python3 tests/tari_c29_gpu_recall.py --self-test
 
@@ -137,7 +150,8 @@ jobs:
             hiveos/h-stats.sh \
             tests/hiveos_stats_test.sh \
             tools/ntrims_sweep.sh \
-            tests/ntrims_sweep_test.sh
+            tests/ntrims_sweep_test.sh \
+            tools/seeda_spill_report.sh
 
       - name: Run shell launcher regressions
         run: bash tests/start_c29_launcher_test.sh
@@ -191,7 +205,9 @@ jobs:
             'cl /nologo /std:c++17 /EHsc /O2 /DGRAPH_UNION_SKIP=1 /DNDEBUG /I. /Ithird_party\cuckoo\src\cuckaroo tests\tari_graph_test.cpp /Fe:tests\tari_graph_test.exe',
             'tests\tari_graph_test.exe',
             'cl /nologo /std:c++17 /EHsc /O2 tari_c29.cpp tari_c29_selftest.cpp /Fe:tari_c29_selftest.exe',
-            'tari_c29_selftest.exe'
+            'tari_c29_selftest.exe',
+            'cl /nologo /std:c++17 /EHsc /O2 /I. tests\tari_seeda_schedule_test.cpp /Fe:tests\tari_seeda_schedule_test.exe',
+            'tests\tari_seeda_schedule_test.exe'
           ) -join ' && '
           & cmd.exe /d /s /c $command
           if ($LASTEXITCODE -ne 0) {

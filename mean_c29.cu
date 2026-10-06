@@ -13,6 +13,7 @@
 #include "graph.hpp"
 #include "../crypto/siphash.cuh"
 #include "../crypto/blake2.h"
+#include "seeda_checkpoint.h"
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -123,6 +124,15 @@ const u32 ROW_EDGES_B = EDGES_B * NY;
 #ifndef SEEDA_REHASH
 #define SEEDA_REHASH 0
 #endif
+// Experimental. SeedA buffers the first C hashes of each 64-edge block in
+// registers and restarts from a saved state for the rest (seeda_checkpoint.h):
+// 64 + (63 - C) hashes per block instead of 127. Non-zero overrides SEEDA_REHASH.
+#ifndef SEEDA_CHECKPOINT
+#define SEEDA_CHECKPOINT 0
+#endif
+#if SEEDA_CHECKPOINT != 0 && SEEDA_CHECKPOINT != 8 && SEEDA_CHECKPOINT != 16 && SEEDA_CHECKPOINT != 32
+#error "SEEDA_CHECKPOINT must be 0, 8, 16 or 32"
+#endif
 
 #ifndef GPUASSERT_RESET_ON_ERROR
 #define GPUASSERT_RESET_ON_ERROR 0
@@ -207,6 +217,35 @@ __device__ u32 endpoint(uint2 nodes, int uorv) {
 #define FLUSHA 8
 #endif
 
+// SeedA's per-edge body. Every thread of the block must call it the same
+// number of times (64 per edge block), because it has two barriers.
+template<int maxOut>
+__device__ __forceinline__ void seedAEmit(const u64 edge, uint2 (*tmp)[2*FLUSHA], int *counters, const int col,
+                                          ulonglong4 * __restrict__ buffer, u32 * __restrict__ indexes) {
+  const int FLUSHA2 = 2*FLUSHA;
+  const int TMPPERLL4 = sizeof(ulonglong4) / sizeof(uint2);
+  u32 node0 = edge & EDGEMASK;
+  u32 node1 = (edge >> 32) & EDGEMASK;
+  int row = node0 >> YZBITS;
+  int counter = min((int)atomicAdd(counters + row, 1), (int)(FLUSHA2-1)); // assuming ROWS_LIMIT_LOSSES checked
+  tmp[row][counter] = make_uint2(node0, node1);
+  __syncthreads();
+  if (counter == FLUSHA-1) {
+    int localIdx = min(FLUSHA2, counters[row]);
+    int newCount = localIdx % FLUSHA;
+    int nflush = localIdx - newCount;
+    u32 grp = row * NX + col;
+    int cnt = min((int)atomicAdd(indexes + grp, nflush), (int)(maxOut - nflush));
+    for (int i = 0; i < nflush; i += TMPPERLL4)
+      buffer[((u64)grp * maxOut + cnt + i) / TMPPERLL4] = *(ulonglong4 *)(&tmp[row][i]);
+    for (int t = 0; t < newCount; t++) {
+      tmp[row][t] = tmp[row][t + nflush];
+    }
+    counters[row] = newCount;
+  }
+  __syncthreads();
+}
+
 template<int maxOut>
 __global__ void SeedA(const siphash_keys sipkeys, ulonglong4 * __restrict__ buffer, u32 * __restrict__ indexes) {
   const int group = blockIdx.x;
@@ -219,7 +258,7 @@ __global__ void SeedA(const siphash_keys sipkeys, ulonglong4 * __restrict__ buff
   __shared__ uint2 tmp[NX][FLUSHA2]; // needs to be ulonglong4 aligned
   __shared__ int counters[NX];
   const int TMPPERLL4 = sizeof(ulonglong4) / sizeof(uint2);
-#if !SEEDA_REHASH
+#if !SEEDA_CHECKPOINT && !SEEDA_REHASH
   u64 buf[EDGE_BLOCK_SIZE];
 #endif
 
@@ -231,7 +270,11 @@ __global__ void SeedA(const siphash_keys sipkeys, ulonglong4 * __restrict__ buff
   const int loops = NEDGES / nthreads; // assuming THREADS_HAVE_EDGES checked
   for (int blk = 0; blk < loops; blk += EDGE_BLOCK_SIZE) {
     u32 nonce0 = gid * loops + blk;
-#if SEEDA_REHASH
+#if SEEDA_CHECKPOINT
+    static_assert(EDGE_BLOCK_SIZE == 64, "seedaCheckpointBlock assumes 64-edge blocks");
+    auto emit = [&](const u64 edge) { seedAEmit<maxOut>(edge, tmp, counters, col, buffer, indexes); };
+    seedaCheckpointBlock<SEEDA_CHECKPOINT, diphash_state<> >(sipkeys, nonce0 & ~EDGE_BLOCK_MASK, emit);
+#elif SEEDA_REHASH
     const word_t edge0 = nonce0 & ~EDGE_BLOCK_MASK;
     diphash_state<> lastState(sipkeys);
     for (u32 e = 0; e < EDGE_BLOCK_SIZE; e++)
@@ -246,32 +289,13 @@ __global__ void SeedA(const siphash_keys sipkeys, ulonglong4 * __restrict__ buff
       } else {
         edge = last;
       }
+      seedAEmit<maxOut>(edge, tmp, counters, col, buffer, indexes);
+    }
 #else
     const u64 last = dipblock(sipkeys, nonce0, buf);
-    for (u32 e = 0; e < EDGE_BLOCK_SIZE; e++) {
-      u64 edge = buf[e] ^ last;
+    for (u32 e = 0; e < EDGE_BLOCK_SIZE; e++)
+      seedAEmit<maxOut>(buf[e] ^ last, tmp, counters, col, buffer, indexes);
 #endif
-      u32 node0 = edge & EDGEMASK;
-      u32 node1 = (edge >> 32) & EDGEMASK;
-      int row = node0 >> YZBITS;
-      int counter = min((int)atomicAdd(counters + row, 1), (int)(FLUSHA2-1)); // assuming ROWS_LIMIT_LOSSES checked
-      tmp[row][counter] = make_uint2(node0, node1);
-      __syncthreads();
-      if (counter == FLUSHA-1) {
-        int localIdx = min(FLUSHA2, counters[row]);
-        int newCount = localIdx % FLUSHA;
-        int nflush = localIdx - newCount;
-        u32 grp = row * NX + col;
-        int cnt = min((int)atomicAdd(indexes + grp, nflush), (int)(maxOut - nflush));
-        for (int i = 0; i < nflush; i += TMPPERLL4)
-          buffer[((u64)grp * maxOut + cnt + i) / TMPPERLL4] = *(ulonglong4 *)(&tmp[row][i]);
-        for (int t = 0; t < newCount; t++) {
-          tmp[row][t] = tmp[row][t + nflush];
-        }
-        counters[row] = newCount;
-      }
-      __syncthreads();
-    }
   }
   uint2 zero = make_uint2(0, 0);
   for (int row = lid; row < NX; row += dim) {
