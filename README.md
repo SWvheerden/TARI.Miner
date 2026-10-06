@@ -334,9 +334,13 @@ Try them through `TARI_ARCH_FLAGS`:
 - `-DLATE_ROUND_BPB=2`, `4` or `8`: each late-round block filters that many
   buckets with one shared bitmap, cutting the late-round grid by the same
   factor (default 1 keeps the existing kernel).
+- `-DSEEDA_CHECKPOINT=8`, `16` or `32`: SeedA keeps the first C hashes of each
+  64-edge block in registers and rehashes only from there, instead of
+  rehashing the whole block (default 0 keeps `SEEDA_REHASH`).
 
 `docs/spec2_gpu_validation.md` lists the GPU measurements and recall checks
-that decide whether to enable them.
+that decide whether to enable them; `docs/seeda_checkpoint.md` has the spill
+report and the steps for `SEEDA_CHECKPOINT`.
 
 `tests/tari_c29_gpu_recall.py` takes the expected release trim count from
 `-DTARI_C29_DEFAULT_NTRIMS=` in the same file (50 if absent). It honours
