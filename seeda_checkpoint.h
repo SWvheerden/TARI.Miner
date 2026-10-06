@@ -31,7 +31,9 @@
 template <int C, typename State, typename Keys, typename Emit>
 SEEDA_HD void seedaCheckpointBlock(const Keys &keys, const uint32_t edge0, Emit &emit) {
   static_assert(C > 0 && C < 64, "checkpoint must fall inside the 64-edge block");
-  uint64_t buf[C];
+  // Zeroed: the first shifts copy entries not yet written, and reading an
+  // indeterminate value is undefined (it also cost registers and spills).
+  uint64_t buf[C] = {};
   State shs(keys);
   SEEDA_PRAGMA(unroll 1)
   for (int e = 0; e < C; e++) {

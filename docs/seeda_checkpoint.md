@@ -15,7 +15,7 @@ reference `tari_c29_edge()`.
 | `SEEDA_REHASH=1` (release default) | 127 | 0 | |
 | `SEEDA_CHECKPOINT=8` | 119 | 0 | |
 | `SEEDA_CHECKPOINT=16` | 111 | 0 | |
-| `SEEDA_CHECKPOINT=32` | 95 | spills on sm_86 / sm_89 | |
+| `SEEDA_CHECKPOINT=32` | 95 | 0 | |
 
 A non-zero `SEEDA_CHECKPOINT` overrides `SEEDA_REHASH`; any value other than
 0, 8, 16 or 32 is a compile error. With the default 0 the `SeedA` SASS of
@@ -32,25 +32,24 @@ gives the same numbers in every row.
 |------|------|-----------|------------------|-----------------|-----------------|-------------------|
 | sm_86 | `SEEDA_REHASH=0` | 85 | 0 | 0 | 512 | 952 |
 | sm_86 | `SEEDA_REHASH=1` | 91 | 0 | 0 | 0 | 976 |
-| sm_86 | `SEEDA_CHECKPOINT=8` | 96 | 0 | 0 | 0 | 1,664 |
-| sm_86 | `SEEDA_CHECKPOINT=16` | 93 | 0 | 0 | 0 | 1,696 |
-| sm_86 | `SEEDA_CHECKPOINT=32` | 96 | 12 | 24 | 16 | 1,880 |
+| sm_86 | `SEEDA_CHECKPOINT=8` | 91 | 0 | 0 | 0 | 1,672 |
+| sm_86 | `SEEDA_CHECKPOINT=16` | 94 | 0 | 0 | 0 | 1,712 |
+| sm_86 | `SEEDA_CHECKPOINT=32` | 96 | 0 | 0 | 0 | 1,904 |
 | sm_89 | `SEEDA_REHASH=0` | 85 | 0 | 0 | 512 | 952 |
 | sm_89 | `SEEDA_REHASH=1` | 91 | 0 | 0 | 0 | 976 |
-| sm_89 | `SEEDA_CHECKPOINT=8` | 96 | 0 | 0 | 0 | 1,664 |
-| sm_89 | `SEEDA_CHECKPOINT=16` | 93 | 0 | 0 | 0 | 1,696 |
-| sm_89 | `SEEDA_CHECKPOINT=32` | 96 | 12 | 24 | 16 | 1,880 |
+| sm_89 | `SEEDA_CHECKPOINT=8` | 91 | 0 | 0 | 0 | 1,672 |
+| sm_89 | `SEEDA_CHECKPOINT=16` | 94 | 0 | 0 | 0 | 1,712 |
+| sm_89 | `SEEDA_CHECKPOINT=32` | 96 | 0 | 0 | 0 | 1,904 |
 | sm_120 | `SEEDA_REHASH=0` | 64 | 0 | 0 | 512 | 944 |
 | sm_120 | `SEEDA_REHASH=1` | 72 | 0 | 0 | 0 | 808 |
-| sm_120 | `SEEDA_CHECKPOINT=8` | 87 | 0 | 0 | 0 | 984 |
-| sm_120 | `SEEDA_CHECKPOINT=16` | 96 | 0 | 0 | 0 | 1,000 |
-| sm_120 | `SEEDA_CHECKPOINT=32` | 95 | 0 | 0 | 0 | 1,072 |
+| sm_120 | `SEEDA_CHECKPOINT=8` | 85 | 0 | 0 | 0 | 992 |
+| sm_120 | `SEEDA_CHECKPOINT=16` | 96 | 0 | 0 | 0 | 1,016 |
+| sm_120 | `SEEDA_CHECKPOINT=32` | 95 | 0 | 0 | 0 | 1,096 |
 
 The `SEEDA_REHASH=0` stack frame is the `buf[64]` array in local memory, not a
 spill.
 
-**Candidates (no spills):** sm_86 and sm_89: C = 8 and 16. sm_120: C = 8, 16
-and 32. C = 32 is not a candidate on sm_86 / sm_89.
+**Candidates (no spills):** C = 8, 16 and 32 on all three archs.
 
 **Code size.** `buf` only stays in registers if every index into it is a
 compile-time constant. The first version did that by fully unrolling the two
@@ -63,9 +62,13 @@ are rolled. The two `buf` loops append at `buf[C - 1]` or emit `buf[0]`, and
 then shift `buf` down by one with an unrolled copy. That costs about C*C
 register moves per block but keeps one copy of each body: SeedA now has two
 emit sites (five `BAR.SYNC`, including the counter reset), and each thread
-still runs 64 emits and 128 barriers per block. The spills are the same as in
-the unrolled version, except for C = 32 on sm_86 / sm_89, which spilled 8 B
-each way and now spills 12 / 24 B. It was not a candidate in either version.
+still runs 64 emits and 128 barriers per block.
+
+`buf` is zeroed before the fill loop because the first C - 1 shifts copy
+entries that have not been written yet. Reading those is undefined behaviour,
+and leaving `buf` uninitialised also made C = 32 spill on sm_86 / sm_89
+(12 / 24 B). With the zeroing, no build spills, for 8 to 24 more
+instructions.
 
 To reproduce (about 4 minutes on Apple silicon under emulation):
 
@@ -96,7 +99,7 @@ it to a named file straight after building.
    set "TARI_ARCH_FLAGS= "
    build_solver.bat sm_89
    copy bin\tari_c29_solver_sm_89.exe bin\candidates\rehash.exe
-   for %c in (8 16) do (
+   for %c in (8 16 32) do (
      set "TARI_ARCH_FLAGS=-DSEEDA_CHECKPOINT=%c -Xptxas -v"
      call build_solver.bat sm_89 > seeda_c%c_build.log 2>&1
      copy bin\tari_c29_solver_sm_89.exe bin\candidates\c%c.exe
@@ -108,7 +111,7 @@ it to a named file straight after building.
    `0 bytes spill stores, 0 bytes spill loads` and a `0 bytes stack frame`:
 
    ```powershell
-   foreach ($c in 8, 16) { Select-String -Path "seeda_c${c}_build.log" -Pattern "Compiling entry function '_Z5SeedA" -Context 0,2 }
+   foreach ($c in 8, 16, 32) { Select-String -Path "seeda_c${c}_build.log" -Pattern "Compiling entry function '_Z5SeedA" -Context 0,2 }
    ```
 
    A candidate that spills with this toolkit is out.
@@ -126,13 +129,16 @@ it to a named file straight after building.
    set "TARI_ARCH_FLAGS=-DTRIM_STAGE_TIMING=1 -DSEEDA_CHECKPOINT=16"
    build_solver.bat sm_89
    copy bin\tari_c29_solver_sm_89.exe bin\candidates\timing_c16.exe
-   for %n in (rehash c8 c16) do bin\candidates\timing_%n.exe --count 200 --pipeline 1 > timing_%n.log
+   set "TARI_ARCH_FLAGS=-DTRIM_STAGE_TIMING=1 -DSEEDA_CHECKPOINT=32"
+   build_solver.bat sm_89
+   copy bin\tari_c29_solver_sm_89.exe bin\candidates\timing_c32.exe
+   for %n in (rehash c8 c16 c32) do bin\candidates\timing_%n.exe --count 200 --pipeline 1 > timing_%n.log
    ```
 
    Average the `SeedA` field, skipping the first 10 graphs:
 
    ```powershell
-   foreach ($n in 'rehash', 'c8', 'c16') {
+   foreach ($n in 'rehash', 'c8', 'c16', 'c32') {
      $ms = Select-String -Path "timing_$n.log" -Pattern '^stage-ms SeedA' | Select-Object -Skip 10 |
        ForEach-Object { [double](($_.Line -split ' ')[2]) }
      '{0,-7} SeedA {1:N3} ms' -f $n, ($ms | Measure-Object -Average).Average
@@ -182,4 +188,4 @@ it to a named file straight after building.
 **Other archs.** sm_86 is the same, with `sm_86` in place of `sm_89`.
 `build_flags/sm_120.flags` is not empty and `TARI_ARCH_FLAGS` replaces it, so
 on sm_120 put the whole list from that file in `TARI_ARCH_FLAGS` together with
-`-DSEEDA_CHECKPOINT=C`, also for the baseline, and include C = 32.
+`-DSEEDA_CHECKPOINT=C`, also for the baseline.
