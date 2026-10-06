@@ -163,3 +163,6 @@ if ($script:failures -ne 0) {
     exit 1
 }
 Write-Host "PASS: $($script:checks) ntrims sweep checks"
+# The expected-failure cases leave a non-zero $LASTEXITCODE behind, which
+# Windows PowerShell 5.1 (-command ". 'script'") reports as the step result.
+exit 0
