@@ -135,7 +135,9 @@ jobs:
             hiveos/h-config.sh \
             hiveos/h-run.sh \
             hiveos/h-stats.sh \
-            tests/hiveos_stats_test.sh
+            tests/hiveos_stats_test.sh \
+            tools/ntrims_sweep.sh \
+            tests/ntrims_sweep_test.sh
 
       - name: Run shell launcher regressions
         run: bash tests/start_c29_launcher_test.sh
@@ -150,6 +152,9 @@ jobs:
 
       - name: Run build flag reader regressions
         run: bash tests/build_flags_test.sh
+
+      - name: Run ntrims sweep dry-run regressions
+        run: bash tests/ntrims_sweep_test.sh
 
   windows:
     name: Windows CPU and launcher checks
@@ -196,16 +201,22 @@ jobs:
       - name: Check PowerShell launcher syntax
         shell: powershell
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path '.\start-c29.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count) {
-            $errors | Format-List
-            exit 1
+          foreach ($path in @(
+            '.\start-c29.ps1',
+            '.\tools\ntrims_sweep.ps1',
+            '.\tests\ntrims_sweep_test.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              $errors | Format-List
+              exit 1
+            }
           }
           $manifest = [IO.File]::ReadAllBytes(
             (Resolve-Path '.\hiveos\h-manifest.conf')
@@ -225,3 +236,7 @@ jobs:
       - name: Run GPU recall verifier fixtures
         shell: powershell
         run: python tests\tari_c29_gpu_recall.py --self-test
+
+      - name: Run ntrims sweep dry-run regressions
+        shell: powershell
+        run: .\tests\ntrims_sweep_test.ps1

@@ -1299,6 +1299,8 @@ struct edgetrimmer {
 
 struct SolverTrimResult {
   u32 nedges = 0;
+  // Surviving edges before the MAXEDGES cap (nedges is capped). Statistics only.
+  u32 uncapped_nedges = 0;
   cudaError_t cuda_error = cudaSuccess;
 };
 
@@ -1310,6 +1312,10 @@ struct solver_ctx {
   graph<word_t> cg;
   uint2 soledges[PROOFSIZE];
   std::vector<u32> sols; // concatenation of all proof's indices
+  // Wall time (steady clock) of the last findcycles_with_keys host search:
+  // graph reset, edge inserts and cycle finding, not the GPU recovery of
+  // any cycle found. Statistics only.
+  double last_host_search_sec = 0.0;
 #if RECOVERY_SMALL_OUTPUT
   u32 *recoverIndexes;
 #endif
@@ -1353,9 +1359,12 @@ struct solver_ctx {
   }
 
   int findcycles_with_keys(uint2 *edges, u32 nedges, const siphash_keys &keys, std::vector<u32> &outSols) {
+    const auto search_start = std::chrono::steady_clock::now();
     cg.reset();
     for (u32 i = 0; i < nedges; i++)
       cg.add_compress_edge(edges[i].x, edges[i].y);
+    last_host_search_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - search_start).count();
     for (u32 s = 0 ;s < cg.nsols; s++) {
       // print_log("Solution");
       for (u32 j = 0; j < PROOFSIZE; j++) {
@@ -1436,7 +1445,8 @@ struct solver_ctx {
     return trim_copy_to(edges);
   }
 
-  u32 trim_copy_to(uint2 *outEdges, cudaError_t *copy_error = nullptr) {
+  u32 trim_copy_to(uint2 *outEdges, cudaError_t *copy_error = nullptr,
+                   u32 *uncapped_nedges = nullptr) {
 #if TRIM_STAGE_TIMING
     cudaEvent_t copyStart, copyStop;
     checkCudaErrors(cudaEventCreate(&copyStart));
@@ -1444,6 +1454,8 @@ struct solver_ctx {
 #endif
     if (copy_error)
       *copy_error = cudaSuccess;
+    if (uncapped_nedges)
+      *uncapped_nedges = 0;
     trimmer.abort = false;
     u32 nedges = trimmer.trim();
     if (trimmer.trim_error != cudaSuccess) {
@@ -1451,6 +1463,8 @@ struct solver_ctx {
         *copy_error = trimmer.trim_error;
       return 0;
     }
+    if (uncapped_nedges)
+      *uncapped_nedges = nedges;
     if (!nedges) {
 #if TRIM_STAGE_TIMING
       checkCudaErrors(cudaEventDestroy(copyStart));
@@ -1507,7 +1521,7 @@ struct solver_ctx {
     }
 
     cudaError_t copy_rc = cudaSuccess;
-    result.nedges = trim_copy_to(outEdges, &copy_rc);
+    result.nedges = trim_copy_to(outEdges, &copy_rc, &result.uncapped_nedges);
 
     // All trim work uses the trimmer's stream: the calling thread's default
     // stream (the release build selects per-thread default streams), or its
@@ -1520,6 +1534,7 @@ struct solver_ctx {
         : (sync_rc != cudaSuccess ? sync_rc : last_rc);
 #if TARI_TEST_FORCE_ZERO_YIELD
     result.nedges = 0;
+    result.uncapped_nedges = 0;
 #endif
 #if TARI_TEST_FORCE_CUDA_ERROR
     // Exercise the same fatal path with a real CUDA runtime error rather than

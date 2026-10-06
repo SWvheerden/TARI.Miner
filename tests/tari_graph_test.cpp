@@ -197,6 +197,21 @@ static void test_node_overflow(std::mt19937 &rng) {
     run_rounds([&] { return new graph<word_t>(maxedges, maxnodes, MAXSOLS, compressbits); },
                sets, "overflow", &sols);
     check(sols >= 2, "planted 42-cycles after an overflow are found");
+
+    // The solver counts graphs with an overflow from this counter.
+    graph<word_t> g(maxedges, maxnodes, MAXSOLS, compressbits);
+    g.reset();
+    add_all(g, sets[1]);
+    check(g.compressu->overflows + g.compressv->overflows == 0,
+          "no overflow count for a graph that fits");
+    g.reset();
+    add_all(g, sets[0]);
+    const size_t after_overflow = g.compressu->overflows + g.compressv->overflows;
+    check(after_overflow > 0, "an overflowing graph is counted");
+    g.reset();
+    add_all(g, sets[3]);
+    check(g.compressu->overflows + g.compressv->overflows == after_overflow,
+          "the overflow count survives reset() and does not grow for a fitting graph");
 }
 
 static void test_uncompressed_graph(std::mt19937 &rng) {

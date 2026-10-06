@@ -10,6 +10,11 @@ the miner's C++ packing or difficulty code.  A recall file has this shape:
     {"type":"cycle","nonce":32,"difficulty":1,"edges":[... 42 integers ...]}
     {"type":"summary","graphs":4200,"cycles":100,"verify_failures":0}
 
+Newer solvers add per-graph cost statistics to the summary record (see
+``GRAPH_COST_KEYS``). They are optional, so older recall files still validate;
+when present, all of them must be present and consistent. They are timing and
+edge-count statistics only and play no part in the proof comparison.
+
 Use ``--help`` for validation, comparison, and live GPU invocation examples.
 """
 
@@ -20,6 +25,7 @@ import contextlib
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -66,6 +72,31 @@ FATAL_PATTERNS = (
         ),
     ),
 )
+
+
+# Optional summary keys written by solvers with the ntrims instrumentation.
+# Percentiles are nearest-rank; search_* is the host cycle search without the
+# GPU recovery; busy_fraction is search_sec / elapsed_sec.
+GRAPH_COST_INT_KEYS = (
+    "edges_min",
+    "edges_p50",
+    "edges_p99",
+    "edges_max",
+    "recovery_graphs",
+    "oops_graphs",
+    "node_overflow_graphs",
+)
+GRAPH_COST_NUMBER_KEYS = (
+    "search_ms_p50",
+    "search_ms_p99",
+    "search_ms_max",
+    "search_ms_mean",
+    "search_sec",
+    "recovery_sec",
+    "elapsed_sec",
+    "busy_fraction",
+)
+GRAPH_COST_KEYS = GRAPH_COST_INT_KEYS + GRAPH_COST_NUMBER_KEYS
 
 
 class RecallError(ValueError):
@@ -150,6 +181,44 @@ def _require_int(
             suffix = " and <= {}".format(maximum)
         raise RecallError("{} must be >= {}{}".format(key, minimum, suffix))
     return value
+
+
+def _require_number(record: Dict[str, object], key: str) -> float:
+    value = record.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RecallError("{} must be a number".format(key))
+    if not math.isfinite(value) or value < 0:
+        raise RecallError("{} must be a finite number >= 0".format(key))
+    return float(value)
+
+
+def _validate_graph_costs(summary: Dict[str, object], graphs: int) -> None:
+    """Check the optional per-graph cost keys: all or none, and consistent."""
+    present = [key for key in GRAPH_COST_KEYS if key in summary]
+    if not present:
+        return
+    missing = [key for key in GRAPH_COST_KEYS if key not in summary]
+    if missing:
+        raise RecallError(
+            "summary has some graph cost keys but is missing {}".format(
+                ", ".join(missing)
+            )
+        )
+    ints = {key: _require_int(summary, key, 0, MAX_U64) for key in GRAPH_COST_INT_KEYS}
+    numbers = {key: _require_number(summary, key) for key in GRAPH_COST_NUMBER_KEYS}
+    if not (
+        ints["edges_min"] <= ints["edges_p50"] <= ints["edges_p99"] <= ints["edges_max"]
+    ):
+        raise RecallError("summary edges must satisfy min <= p50 <= p99 <= max")
+    if not (
+        numbers["search_ms_p50"] <= numbers["search_ms_p99"] <= numbers["search_ms_max"]
+    ):
+        raise RecallError("summary search_ms must satisfy p50 <= p99 <= max")
+    if numbers["busy_fraction"] > 1:
+        raise RecallError("summary busy_fraction must be <= 1")
+    for key in ("recovery_graphs", "oops_graphs", "node_overflow_graphs"):
+        if ints[key] > graphs:
+            raise RecallError("summary {} exceeds graphs {}".format(key, graphs))
 
 
 def _require_nonempty_string(record: Dict[str, object], key: str) -> str:
@@ -404,6 +473,7 @@ def load_recall(path: Path, log_path: Optional[Path] = None) -> RecallDataset:
         raise RecallError(
             "summary reports {} host verification failures".format(verify_failures)
         )
+    _validate_graph_costs(last, graphs)
 
     if log_path is not None:
         fatal_markers = find_fatal_log_markers(Path(log_path))
@@ -784,6 +854,7 @@ def _write_fixture(
     arch: str = "sm_120",
     device_arch: str = "sm_120",
     profile: str = "release",
+    summary_extra: Optional[Dict[str, object]] = None,
 ) -> None:
     if difficulty is None:
         try:
@@ -825,6 +896,8 @@ def _write_fixture(
             "verify_failures": verify_failures,
         }
     )
+    if summary_extra:
+        records[-1].update(summary_extra)
     path.write_text(
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
         encoding="utf-8",
@@ -1079,6 +1152,68 @@ def self_test() -> int:
         duplicate = root / "duplicate.jsonl"
         _write_fixture(duplicate, edges, summary_cycles=2, duplicate=True)
         expect_recall_error(lambda: load_recall(duplicate), "duplicate proof")
+
+        # Per-graph cost keys are optional: the old-format "valid" fixture
+        # above has none of them.
+        graph_costs = {
+            "edges_min": 90000,
+            "edges_p50": 120000,
+            "edges_p99": 150000,
+            "edges_max": 160000,
+            "search_ms_p50": 4.5,
+            "search_ms_p99": 7.25,
+            "search_ms_max": 9.0,
+            "search_ms_mean": 5.0,
+            "search_sec": 0.005,
+            "recovery_graphs": 1,
+            "recovery_sec": 0.002,
+            "elapsed_sec": 0.2,
+            "busy_fraction": 0.025,
+            "oops_graphs": 0,
+            "node_overflow_graphs": 0,
+        }
+        with_costs = root / "with-costs.jsonl"
+        _write_fixture(with_costs, edges, summary_extra=graph_costs)
+        with_costs_dataset = load_recall(with_costs)
+        check(
+            with_costs_dataset.summary["edges_max"] == 160000,
+            "summary with graph cost keys validates",
+        )
+        check(
+            compare_recall(dataset, with_costs_dataset, "old vs new")["proof_count"]
+            == 1,
+            "graph cost keys do not affect the proof comparison",
+        )
+        integer_ms = dict(graph_costs, search_ms_max=9, busy_fraction=0)
+        integer_ms_path = root / "integer-ms.jsonl"
+        _write_fixture(integer_ms_path, edges, summary_extra=integer_ms)
+        check(
+            load_recall(integer_ms_path).summary["search_ms_max"] == 9,
+            "integral JSON numbers are accepted for timing keys",
+        )
+
+        bad_costs = (
+            ("partial", {"edges_max": 5}, "missing"),
+            ("string", {"edges_p99": "150000"}, "edges_p99 must be an integer"),
+            ("float edges", {"edges_min": 1.5}, "edges_min must be an integer"),
+            ("bool", {"oops_graphs": False}, "oops_graphs must be an integer"),
+            ("negative", {"edges_min": -1}, "edges_min must be >= 0"),
+            ("negative ms", {"search_ms_p50": -0.5}, "finite number"),
+            # json.loads accepts NaN, which is not valid JSON.
+            ("nan", {"elapsed_sec": float("nan")}, "finite number"),
+            ("string ms", {"search_sec": "1"}, "must be a number"),
+            ("edge order", {"edges_p50": 170000}, "min <= p50"),
+            ("ms order", {"search_ms_p99": 10.0}, "p50 <= p99"),
+            ("busy", {"busy_fraction": 1.5}, "busy_fraction"),
+            ("oops count", {"oops_graphs": 2}, "exceeds graphs"),
+            ("recovery count", {"recovery_graphs": 2}, "exceeds graphs"),
+            ("negative recovery", {"recovery_sec": -1.0}, "finite number"),
+        )
+        for name, change, message in bad_costs:
+            extra = change if name == "partial" else dict(graph_costs, **change)
+            bad_path = root / "bad-costs-{}.jsonl".format(name.replace(" ", "-"))
+            _write_fixture(bad_path, edges, summary_extra=extra)
+            expect_recall_error(lambda path=bad_path: load_recall(path), message)
 
         fatal_log = root / "fatal.log"
         fatal_log.write_text(
