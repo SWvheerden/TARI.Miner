@@ -32,19 +32,19 @@ gives the same numbers in every row.
 |------|------|-----------|------------------|-----------------|-----------------|-------------------|
 | sm_86 | `SEEDA_REHASH=0` | 85 | 0 | 0 | 512 | 952 |
 | sm_86 | `SEEDA_REHASH=1` | 91 | 0 | 0 | 0 | 976 |
-| sm_86 | `SEEDA_CHECKPOINT=8` | 96 | 0 | 0 | 0 | 6,616 |
-| sm_86 | `SEEDA_CHECKPOINT=16` | 93 | 0 | 0 | 0 | 11,776 |
-| sm_86 | `SEEDA_CHECKPOINT=32` | 96 | 8 | 8 | 8 | 22,208 |
+| sm_86 | `SEEDA_CHECKPOINT=8` | 96 | 0 | 0 | 0 | 1,664 |
+| sm_86 | `SEEDA_CHECKPOINT=16` | 93 | 0 | 0 | 0 | 1,696 |
+| sm_86 | `SEEDA_CHECKPOINT=32` | 96 | 12 | 24 | 16 | 1,880 |
 | sm_89 | `SEEDA_REHASH=0` | 85 | 0 | 0 | 512 | 952 |
 | sm_89 | `SEEDA_REHASH=1` | 91 | 0 | 0 | 0 | 976 |
-| sm_89 | `SEEDA_CHECKPOINT=8` | 96 | 0 | 0 | 0 | 6,616 |
-| sm_89 | `SEEDA_CHECKPOINT=16` | 93 | 0 | 0 | 0 | 11,776 |
-| sm_89 | `SEEDA_CHECKPOINT=32` | 96 | 8 | 8 | 8 | 22,208 |
+| sm_89 | `SEEDA_CHECKPOINT=8` | 96 | 0 | 0 | 0 | 1,664 |
+| sm_89 | `SEEDA_CHECKPOINT=16` | 93 | 0 | 0 | 0 | 1,696 |
+| sm_89 | `SEEDA_CHECKPOINT=32` | 96 | 12 | 24 | 16 | 1,880 |
 | sm_120 | `SEEDA_REHASH=0` | 64 | 0 | 0 | 512 | 944 |
 | sm_120 | `SEEDA_REHASH=1` | 72 | 0 | 0 | 0 | 808 |
-| sm_120 | `SEEDA_CHECKPOINT=8` | 85 | 0 | 0 | 0 | 3,184 |
-| sm_120 | `SEEDA_CHECKPOINT=16` | 96 | 0 | 0 | 0 | 5,568 |
-| sm_120 | `SEEDA_CHECKPOINT=32` | 96 | 0 | 0 | 0 | 10,424 |
+| sm_120 | `SEEDA_CHECKPOINT=8` | 87 | 0 | 0 | 0 | 984 |
+| sm_120 | `SEEDA_CHECKPOINT=16` | 96 | 0 | 0 | 0 | 1,000 |
+| sm_120 | `SEEDA_CHECKPOINT=32` | 95 | 0 | 0 | 0 | 1,072 |
 
 The `SEEDA_REHASH=0` stack frame is the `buf[64]` array in local memory, not a
 spill.
@@ -52,11 +52,20 @@ spill.
 **Candidates (no spills):** sm_86 and sm_89: C = 8 and 16. sm_120: C = 8, 16
 and 32. C = 32 is not a candidate on sm_86 / sm_89.
 
-The emit loop over `buf` must be unrolled for `buf` to stay in registers, so
-the 64-edge emit body (two barriers, atomics and the flush) is copied C times.
-That is why the kernel is 7 to 23 times larger than the rehash kernel. Instruction
-cache misses could cancel the hashes saved, so only the GPU numbers below can
-decide.
+**Code size.** `buf` only stays in registers if every index into it is a
+compile-time constant. The first version did that by fully unrolling the two
+`buf` loops, which copied `hash24` and the whole emit body (two barriers,
+atomics and the flush, about 640 instructions) C times. That gave 6,616 /
+11,776 / 22,208 SASS instructions on sm_89 for C = 8 / 16 / 32 (about 105 /
+188 / 355 KB), against 976 for rehash. That is more than the instruction
+cache, and the fetch misses could cancel the hashes saved. Now all four loops
+are rolled. The two `buf` loops append at `buf[C - 1]` or emit `buf[0]`, and
+then shift `buf` down by one with an unrolled copy. That costs about C*C
+register moves per block but keeps one copy of each body: SeedA now has two
+emit sites (five `BAR.SYNC`, including the counter reset), and each thread
+still runs 64 emits and 128 barriers per block. The spills are the same as in
+the unrolled version, except for C = 32 on sm_86 / sm_89, which spilled 8 B
+each way and now spills 12 / 24 B. It was not a candidate in either version.
 
 To reproduce (about 4 minutes on Apple silicon under emulation):
 
