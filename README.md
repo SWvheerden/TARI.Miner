@@ -152,6 +152,7 @@ Options placed after the starter command are passed to every selected GPU:
 --login-separator S     Joins wallet and worker in the pool login; defaults to .
 --intensity N           Duty cycle from 1 to 100 percent; defaults to 100
 --pipeline N            Overlapped solver contexts; defaults automatically
+--ntrims N              Even trim-round count; defaults to the build's (50 on sm_89)
 --max-runtime-sec N     Stop after N seconds
 --no-stale-skip         Also search and submit work for a superseded block
 --version               Print version and exit
@@ -182,6 +183,28 @@ The starter supplies `--device`, `--pool`, `--wallet`, and `--worker` after
 user options so each GPU always receives its detected device index and unique
 worker name. If automatic allocation does not fit in VRAM, retry with
 `--pipeline 1`.
+
+### CPU-limited rigs
+
+After the GPU trims a graph, each miner process searches the remaining edges
+for cycles on one CPU thread. At the default 50 trim rounds that takes about
+30 ms per graph on a fast desktop core, about 0.4 of a core per RTX 4080. On a
+rig with a weak CPU and several GPUs (for example 2 cores feeding 4 or more
+fast GPUs) the CPU, not the GPUs, becomes the limit: CPU usage sits near 100%
+and each GPU's graph rate falls below what the same card makes in a desktop.
+
+On such a rig add `--ntrims 60`. Ten more trim rounds cost about 0.8% of GPU
+throughput (measured on an RTX 4080, sm_89) but cut the CPU work per graph by
+about 30%. That is **estimated** to raise the graph rate a CPU-bound rig can
+reach by about 40%; the estimate is modelled from RTX 4080 measurements and has
+not yet been measured on a real weak host. The proofs found are the same.
+Leave it off on a desktop or any rig with CPU to spare, where it only costs
+the 0.8%. `--ntrims 56` is a milder step. Measurements and the estimate behind
+this: `docs/ntrims_weak_host_2026-10-08.md`.
+
+```bash
+./start-c29.sh --ntrims 60
+```
 
 ### Pool login format
 
