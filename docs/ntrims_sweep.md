@@ -172,6 +172,41 @@ only the choice:
 - If the gains are small and close to 0.5%, re-run those values to make sure
   they hold.
 
+## Measured: sm_89 at the default 50 trims (2026-10-06)
+
+The first real sweep, on an RTX 4080 with `-DSEEDA_CHECKPOINT=32`
+([full results](sm89_results_2026-10-06.md)), stopped at the default before
+trying anything lower. What it found changes the premise of this sweep.
+
+| | value | limit |
+|---|---|---|
+| surviving edges p99 / max per graph | 791,462 / 803,598 | stop rule 524,288 (50% of `MAXEDGES`) |
+| max as a share of `MAXEDGES` (1,048,576) | 76.6% | edges above 100% are dropped |
+| OOPS / NODE OVERFLOW graphs | 0 (the stop reason would list them) | any is a stop |
+| busy fraction, full host (i5-13600KF) | 41.8% | |
+| 2-core projected busy | 40.2% | stop rule 40% |
+
+- **Far more edges survive 50 trims than the spec assumed.** Spec 3 expected
+  tens of thousands; it is about 790k. Running fewer trims would push edge counts
+  even closer to `MAXEDGES`, so on this design lower `ntrims` is not an option,
+  whatever the g/s gain.
+- **The headroom above the edge cap is about 23%, and recall can't see it.**
+  Edges beyond `MAXEDGES` are dropped (`OOPS; losing ... edges`), losing any
+  cycle through them. The recall comparison can't catch that, because the
+  reference build runs the same 50 trims and would drop the same edges. Check
+  `lost edges: oops_graphs=0 node_overflow_graphs=0` in the solver summary
+  instead; this run had none.
+- **The host CPU is already a large part of the cost.** A busy fraction of 42%
+  on a fast desktop CPU, and a projected 40% on 2 cores, means a weak
+  multi-GPU host (2 cores, 6 to 12 GPUs) is likely CPU-bound at 50 trims. That
+  is also why the spec 5a sparse reset only saved about 3% per graph: the
+  compressors are mostly full anyway.
+- **Follow-up:** test `ntrims` above 50 (52, 54, 56). More trims cost GPU time
+  but cut surviving edges, which widens the `MAXEDGES` margin and lowers CPU
+  load. That trade may win on weak hosts even if it loses on a desktop. This
+  script only sweeps downward. Running that test on a real weak host, rather
+  than the 2-core projection, would settle it.
+
 ## Recall comparison
 
 The script prints the command. Run it with the current binary and the chosen
