@@ -34,6 +34,19 @@ To select device indexes, add this token to Extra config arguments:
 
   TARI_DEVICES=0,2
 
+Rigs with a weak CPU and several GPUs: each GPU's miner searches every graph
+for cycles on one CPU thread, about 0.4 of a fast core per RTX 4080 at the
+default 50 trim rounds. If the CPU sits near 100% while mining and per-GPU
+graph rates are clearly below what the same cards make in a desktop, the CPU
+is the limit. Then add this to Extra config arguments:
+
+  --ntrims 60
+
+It costs about 0.8% of GPU throughput (measured on an RTX 4080) but cuts the
+CPU work per graph by about 30%, so a CPU-limited rig is estimated to mine
+more (modelled from RTX 4080 measurements, not yet measured on a weak rig).
+The proofs found are the same. Leave it off when the CPU has spare capacity.
+
 The integration writes one log per GPU and reports per-GPU graph rates,
 temperatures, fans, accepted shares, and rejected shares to the HiveOS agent.
 The graph rate is averaged over about the last 60 seconds (earlier versions
