@@ -273,16 +273,24 @@ function Get-Median {
 $gpuName = 'unknown'
 $driver = 'unknown'
 $cuda = 'unknown'
+# The toolkit (nvcc) version is what the binaries were built with, so report
+# it first. The driver's CUDA version is extra; newer drivers word the
+# nvidia-smi header differently, so match any "CUDA ... Version: X".
+$driverCuda = ''
 if (-not $DryRun -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
     $driver = (& nvidia-smi --query-gpu=driver_version --format=csv,noheader -i $Device 2>$null | Select-Object -First 1)
-    $m = [regex]::Match((& nvidia-smi 2>$null | Out-String), 'CUDA Version:\s*([0-9.]+)')
-    if ($m.Success) { $cuda = $m.Groups[1].Value }
+    $m = [regex]::Match((& nvidia-smi 2>$null | Out-String), 'CUDA[A-Za-z ]*Version:\s*([0-9.]+)')
+    if ($m.Success) { $driverCuda = $m.Groups[1].Value }
     if (-not $driver) { $driver = 'unknown' }
 }
+$toolkitCuda = ''
 if (-not $DryRun -and (Get-Command nvcc -ErrorAction SilentlyContinue)) {
     $m = [regex]::Match((& nvcc --version | Out-String), 'release ([0-9.]+)')
-    if ($m.Success) { $cuda = "$cuda (nvcc $($m.Groups[1].Value))" }
+    if ($m.Success) { $toolkitCuda = $m.Groups[1].Value }
 }
+if ($toolkitCuda -and $driverCuda) { $cuda = "$toolkitCuda (nvcc; driver supports $driverCuda)" }
+elseif ($toolkitCuda) { $cuda = "$toolkitCuda (nvcc)" }
+elseif ($driverCuda) { $cuda = "$driverCuda (driver; nvcc not found)" }
 
 $csvLines = New-Object System.Collections.Generic.List[string]
 $csvLines.Add('arch,ntrims,kind,run,pipeline,graphs_per_sec,edges_min,edges_p50,edges_p99,edges_max,search_ms_p50,search_ms_p99,search_ms_max,search_ms_mean,busy_fraction,projected_busy,oops_graphs,node_overflow_graphs,log')

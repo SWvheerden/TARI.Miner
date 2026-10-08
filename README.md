@@ -324,13 +324,17 @@ set "TARI_ARCH_FLAGS=-DTARI_C29_DEFAULT_NTRIMS=48 -DROUND23_TPB=960"
 build_solver.bat sm_89
 ```
 
-Experimental trim options, each off by default and pending GPU measurement.
-Try them through `TARI_ARCH_FLAGS`:
+Experimental trim options, each off by default. Try them through
+`TARI_ARCH_FLAGS`. Measured on an RTX 4080 (sm_89) so far: only
+`SEEDA_CHECKPOINT=32` gained (+1.3%, now enabled in `build_flags/sm_89.flags`);
+`LATE_ROUND_SELF_ZERO_IDX` (-0.4%), `LATE_ROUND_BPB` (no gain) and
+`TRIM_CUDA_GRAPH` (**-17%**) did not. See `docs/sm89_results_2026-10-06.md`.
 
 - `-DLATE_ROUND_SELF_ZERO_IDX=1`: rounds 2, 3 and the late rounds clear the
   bucket counts they read, replacing the per-round index memsets.
 - `-DTRIM_CUDA_GRAPH=1`: each solver context gets its own CUDA stream, and
-  Round 0 through the final edge count runs as one CUDA graph.
+  Round 0 through the final edge count runs as one CUDA graph. It cost 17% on
+  sm_89; don't enable it without a benchmark on the target arch.
 - `-DLATE_ROUND_BPB=2`, `4` or `8`: each late-round block filters that many
   buckets with one shared bitmap, cutting the late-round grid by the same
   factor (default 1 keeps the existing kernel).

@@ -9,7 +9,7 @@ a build without `TARI_ARCH_FLAGS` is the baseline.
 | Macro | Default | What it does |
 |-------|---------|--------------|
 | `LATE_ROUND_SELF_ZERO_IDX=1` | 0 | Rounds 2, 3 and the late rounds zero the bucket counts they read; 48 of the 54 index memsets per graph go away (at 50 trims) |
-| `TRIM_CUDA_GRAPH=1` | 0 | Per-context stream; Round 0 through the final count copy runs as one CUDA graph |
+| `TRIM_CUDA_GRAPH=1` | 0 | Per-context stream; Round 0 through the final count copy runs as one CUDA graph. **-17% on sm_89, see the warning in Step 2b** |
 | `LATE_ROUND_BPB=2/4/8` | 1 | Late rounds use `RoundMulti`, with each block handling 2, 4 or 8 buckets (grid 16384 / BPB) |
 | `ROUND_LATE_TPB=N` | 0 (use `trim.tpb`, 320) | Threads per block in the late rounds, existing option |
 
@@ -90,6 +90,17 @@ copy bin\tari_c29_solver_sm_89.exe bin\candidates\2a.exe
 Benchmark `baseline.exe` and `2a.exe` as above.
 
 ## Step 2b: CUDA graph
+
+> **Warning: 2b measured -17% on sm_89.** On an RTX 4080 (2026-10-06, CUDA 13.4,
+> auto pipeline 2) `-DTRIM_CUDA_GRAPH=1` dropped throughput from 13.793 to
+> 11.446 g/s, and 2a + 2b to 11.354 g/s
+> ([results](sm89_results_2026-10-06.md)). The expected effect was a gain under
+> 1%, so a loss this large points at a structural cost rather than noise. The
+> likely cause is the per-context non-blocking stream the graph needs, which
+> changes how the pipeline contexts' trims overlap; this has not been profiled.
+> **Do not enable `TRIM_CUDA_GRAPH` on any arch** unless it is benchmarked on that
+> arch first and beats the baseline by the keep rule, and treat a gain on one
+> arch as no evidence for another.
 
 ```bat
 set "TARI_ARCH_FLAGS=-DTRIM_CUDA_GRAPH=1"

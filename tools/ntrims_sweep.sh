@@ -264,12 +264,25 @@ median_of() {
 gpu_name="unknown"
 driver="unknown"
 cuda="unknown"
+# The toolkit (nvcc) version is what the binaries were built with, so report
+# it first. The driver's CUDA version is extra; newer drivers word the
+# nvidia-smi header differently, so match any "CUDA ... Version: X".
+driver_cuda=""
+toolkit_cuda=""
 if [[ $dry_run -eq 0 ]] && command -v nvidia-smi >/dev/null 2>&1; then
     driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader -i "$device" 2>/dev/null | head -n 1)" || driver="unknown"
-    cuda="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -n 1)" || cuda="unknown"
+    [[ -n "$driver" ]] || driver="unknown"
+    driver_cuda="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA[A-Za-z ]*Version: *\([0-9.][0-9.]*\).*/\1/p' | head -n 1)" || driver_cuda=""
 fi
 if [[ $dry_run -eq 0 ]] && command -v nvcc >/dev/null 2>&1; then
-    cuda="$cuda (nvcc $(nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p'))"
+    toolkit_cuda="$(nvcc --version | sed -n 's/.*release \([0-9.][0-9.]*\).*/\1/p' | head -n 1)" || toolkit_cuda=""
+fi
+if [[ -n "$toolkit_cuda" && -n "$driver_cuda" ]]; then
+    cuda="$toolkit_cuda (nvcc; driver supports $driver_cuda)"
+elif [[ -n "$toolkit_cuda" ]]; then
+    cuda="$toolkit_cuda (nvcc)"
+elif [[ -n "$driver_cuda" ]]; then
+    cuda="$driver_cuda (driver; nvcc not found)"
 fi
 
 echo "arch,ntrims,kind,run,pipeline,graphs_per_sec,edges_min,edges_p50,edges_p99,edges_max,search_ms_p50,search_ms_p99,search_ms_max,search_ms_mean,busy_fraction,projected_busy,oops_graphs,node_overflow_graphs,log" > "$csv"

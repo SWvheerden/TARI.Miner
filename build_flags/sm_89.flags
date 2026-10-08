@@ -3,33 +3,43 @@
 # ignored. Read by build_solver.{sh,bat} (release profile) and
 # build_pool_miner.{sh,bat}. TARI_ARCH_FLAGS, when non-empty, replaces this list.
 #
-# Intentionally empty: a tuning sweep on real sm_89 hardware found no flag that
-# beats the kernel defaults (including 50 trim rounds).
-#
-# Measured 2026-10-02 on NVIDIA GeForce RTX 4080 (16 GB, solver pipeline=2),
+# Measured 2026-10-06 on NVIDIA GeForce RTX 4080 (16 GB, solver pipeline=2),
 # driver 617.14, CUDA 13.4 (nvcc V13.4.59), MSVC VS 18 Build Tools, 340 W
-# default power limit, clocks not locked.
-# Benchmark: tari_c29_solver_sm_89.exe --count 2000 --nonce 0, 1 warm-up +
-# 5 measured runs, median g/s. Keep rule: gain > 0.5% and > baseline spread.
-#   baseline (no flags): 13.650 g/s (min 13.509, max 13.658, spread 1.09%)
-#   final (no flags):    13.650 g/s, +0.00% (same set; drift re-runs of the
-#                        baseline exe: 13.646, 13.634, 13.628, all within 0.16%)
+# default power limit, clocks not locked, i5-13600KF. Full tables:
+# docs/sm89_results_2026-10-06.md.
+# Benchmark: tari_c29_solver_sm_89.exe --count 2000, auto pipeline, 60 s
+# warm-up, then 3 runs back to back; median g/s. Keep rule: median >= +0.5%
+# and every run above the baseline median. Every kept flag passed the GPU
+# recall comparison (4,200 graphs, identical proof set vs the reference).
+#   baseline (no flags):   13.622 g/s (13.617 13.622 13.627)
+#   final (this file):     13.797 g/s (13.792 13.797 13.798), +1.29%
+# Final check 2026-10-07, file-based build, back to back: baseline 13.617
+# (13.620 13.617 13.617), final 13.791 (13.791 13.801 13.789), +1.28%;
+# final recall PASS (110 proofs, 4,200 graphs).
 #
-# Tested alone on top of the empty set and rejected (RTX 4080, delta vs baseline):
-#   ROUND23_TPB=768                                +0.02%  13.653  (neutral)
-#   ROUND23_COUNT_NORMAL_LOAD=1                    -0.10%  13.637
-#   ROUND1_COUNT_NORMAL_LOAD=1                     -0.12%  13.634
-#   ROUND23_TPB=1024 (default, sanity check)       -0.17%  13.627
-#   ROUND23_TPB=960                                -0.28%  13.612
-#   ROUND_LATE_TPB=512                             -0.40%  13.596
-#   ROUND0_DST_HASH group, BITS=11 PROBES=4        -0.53%  13.578
-#   TARI_C29_DEFAULT_NTRIMS=48                     -0.76%  13.546
-#   FUSE_FINAL_TAIL_CURRENT=1 + _COUNT_NORMAL_LOAD -0.86%  13.533
-#   ROUND0_DST_HASH group, BITS=12 PROBES=8        -2.06%  13.369
-#   ROUND0_DST_HASH group, BITS=12 PROBES=4        -3.90%  13.117
-#   SEEDB_REVERSE_LOOP=1                           -4.69%  13.010
-#   WARP_DST_ATOMICS_LATE=1                        -5.19%  12.942
-#   ROUND_LATE_TPB=1024                            -6.64%  12.744
-# (ROUND0_DST_HASH group = DYNAMIC_BITS/PROBES as listed plus FALLBACK_PLAIN=1,
-# REPLAY_NORMAL_LOAD=1, REVERSE_INSERT=1.) No single flag helped, so there was
-# nothing to combine. Several sm_120 (RTX 5090) flags are clear losses here.
+# Checkpointed SeedA (spec 4, docs/seeda_checkpoint.md). No spills with
+# CUDA 13.4 for C = 8/16/32. SeedA stage ms at pipeline 1: rehash 12.502,
+# C8 12.049, C16 11.643, C32 11.606.
+#   C=8   13.715 (+0.68%), C=16 13.722 (+0.73%, one run below baseline: rejected),
+#   C=32  13.797 (+1.29%): kept, recall PASS.
+-DSEEDA_CHECKPOINT=32
+#
+# Tested on top of SEEDA_CHECKPOINT=32 (13.793 g/s) and rejected (spec 2,
+# docs/spec2_gpu_validation.md; late rounds = 18.4% of trim time):
+#   LATE_ROUND_SELF_ZERO_IDX=1 (2a)             13.736  -0.41%
+#   TRIM_CUDA_GRAPH=1 (2b)                      11.446  -17.0%
+#   2a + 2b                                     11.354  -17.7%
+# 2c, against a fresh C32 base of 13.804 g/s:
+#   ROUND_LATE_TPB=256 / 512 / 1024             13.799 / 13.768 / 12.909
+#   LATE_ROUND_BPB=2 with TPB 256 / 512 / 1024  13.694 / 13.705 / 13.162
+#   LATE_ROUND_BPB=4 with TPB 256 / 512 / 1024  13.695 / 13.693 / 13.221
+#   LATE_ROUND_BPB=8 with TPB 256 / 512 / 1024  12.796 / 13.140 / 13.131
+# ntrims (spec 3, tools/ntrims_sweep.ps1): 50 already exceeds the sweep limits
+# (max surviving edges 803,598 > 524,288; 2-core projected busy 0.402 > 0.40),
+# so no lower value was tried: default stays 50.
+#
+# Earlier sweep (2026-10-02, same machine, 1 warm-up + 5 runs, before spec 4):
+# rejected ROUND23_TPB=768/960/1024, ROUND23_COUNT_NORMAL_LOAD,
+# ROUND1_COUNT_NORMAL_LOAD, ROUND_LATE_TPB=512/1024, ROUND0_DST_HASH group,
+# TARI_C29_DEFAULT_NTRIMS=48, FUSE_FINAL_TAIL_CURRENT, SEEDB_REVERSE_LOOP,
+# WARP_DST_ATOMICS_LATE (all between +0.02% and -6.64%).
