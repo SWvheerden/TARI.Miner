@@ -95,8 +95,8 @@ renumbered from 0):
   HIP_VISIBLE_DEVICES=0
 
 AMD graph rates and share counters come from the miner logs. Temperatures and
-fans come from the HiveOS agent's GPU stats, matched in bus order; without
-them they show as 0.
+fans come from the HiveOS agent's GPU stats, matched by PCI bus with the bus
+the miner prints when it starts; without them they show as 0.
 
 Please report AMD results, good or bad, as a GitHub issue with the GPU model,
 the ROCm version, the --list-devices output, the first lines of the Miner Log

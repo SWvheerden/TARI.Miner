@@ -195,7 +195,7 @@ Options placed after the starter command are passed to every selected GPU:
 --ntrims N              Even trim-round count; defaults to the build's (50 on sm_89)
 --max-runtime-sec N     Stop after N seconds
 --no-stale-skip         Also search and submit work for a superseded block
---list-devices          Print index, name and architecture of each GPU, then exit
+--list-devices          Print index, name, architecture and PCI bus of each GPU, then exit
 --version               Print version and exit
 ```
 

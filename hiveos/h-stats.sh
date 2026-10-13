@@ -138,39 +138,56 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
 done <<< "$nvidia_output"
 
 # AMD workers. start-c29.sh writes amd<index>.log for each AMD GPU it starts
-# (h-run.sh clears old logs first), so the logs name the AMD GPUs in use.
-# Temperature, fan and bus come from the HiveOS GPU stats: the AMD entries
-# there, in bus order, are taken to be HIP devices 0, 1, 2, ... (the HIP
-# runtime also lists GPUs in bus order). Without the stats file, or without
-# jq, they are reported as 0.
-amd_hw=()
+# (h-run.sh clears old logs first), so the logs name the AMD GPUs in use. The
+# HIP index is not a HiveOS card index (HIP_VISIBLE_DEVICES renumbers it), so
+# the card is found by PCI bus: the AMD miner's first log line ends in
+# "bus XX" (hex), and the HiveOS GPU stats list each card's bus id with its
+# temperature and fan. Without a bus in the log, the stats file or jq, the
+# values are reported as 0. There is no fallback to matching by position.
+
+# pci_bus_number BUSID
+#   Prints the PCI bus of a bus id such as 03:00.0 or 0000:03:00.0 in
+#   decimal, as bus_numbers reports it; prints nothing for anything else.
+pci_bus_number() {
+    local bus="$1"
+    bus="${bus%:*}"
+    bus="${bus##*:}"
+    case "$bus" in
+        ''|*[!0-9A-Fa-f]*) return 0 ;;
+    esac
+    printf '%d' "$((16#$bus))"
+}
+
+gpu_stats_rows=()
 if [[ -f "$GPU_STATS_JSON" ]] && command -v jq >/dev/null 2>&1; then
     while read -r line; do
-        amd_hw+=("$line")
-    done < <(jq -r 'if (.brand | type) == "array" then
-            range(0; .brand | length) as $i
-            | select(.brand[$i] == "amd")
-            | "\(.temp[$i] // 0) \(.fan[$i] // 0) \(.busids[$i] // 0)"
+        gpu_stats_rows+=("$line")
+    done < <(jq -r 'if (.busids | type) == "array" then
+            range(0; .busids | length) as $i
+            | "\(.busids[$i]) \(.temp[$i] // 0) \(.fan[$i] // 0)"
         else empty end' "$GPU_STATS_JSON" 2>/dev/null || true)
 fi
 amd_indexes="$(ls "$TARI_LOG_DIR" 2>/dev/null | sed -n -E 's/^amd(0|[1-9][0-9]*)\.log$/\1/p' | sort -n)"
 while read -r index; do
     [[ -n "$index" ]] || continue
-    read_log_stats "$TARI_LOG_DIR/amd$index.log"
+    log_file="$TARI_LOG_DIR/amd$index.log"
+    read_log_stats "$log_file"
 
     temp=0
     fan=0
     bus=0
-    if ((index < ${#amd_hw[@]})); then
-        read -r temp fan bus <<< "${amd_hw[$index]}"
+    log_bus="$(head -n 20 "$log_file" 2>/dev/null | sed -n -E 's/^TARI\.Miner C29 .*, bus ([0-9a-fA-F]{1,2})\)$/\1/p' | head -n 1)"
+    if [[ -n "$log_bus" ]]; then
+        bus="$(pci_bus_number "$log_bus")"
+        for row in "${gpu_stats_rows[@]}"; do
+            read -r row_busid row_temp row_fan <<< "$row"
+            if [[ "$(pci_bus_number "$row_busid")" == "$bus" ]]; then
+                temp="$row_temp"
+                fan="$row_fan"
+                break
+            fi
+        done
     fi
-    # HiveOS bus ids look like 03:00.0, sometimes with a 0000: domain.
-    bus="${bus%:*}"
-    bus="${bus##*:}"
-    case "$bus" in
-        ''|*[!0-9A-Fa-f]*) bus=0 ;;
-        *) bus=$((16#$bus)) ;;
-    esac
     temp="${temp%%.*}"
     fan="${fan%%.*}"
     case "$temp" in ''|*[!0-9]*) temp=0 ;; esac

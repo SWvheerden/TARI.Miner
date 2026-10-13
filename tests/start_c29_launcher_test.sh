@@ -35,7 +35,8 @@ EOF
 }
 
 # Fake AMD backend: --list-devices prints DEVICES (printf format, one
-# "index<TAB>name<TAB>arch" line per GPU); a worker run just exits 0.
+# "index<TAB>name<TAB>arch<TAB>bus" line per GPU; older builds print no bus);
+# a worker run just exits 0.
 write_amd_miner() {
     local destination="$1"
     local devices="$2"
@@ -152,9 +153,10 @@ rm -f -- "$SURVIVOR_PID_FILE"
 # worker starts per AMD GPU, named -amd<index>.
 amd_only_root="$(make_case amd-only)"
 # Device 1 reports a feature suffix; device 2 is an integrated GPU the backend
-# has no code for, and must be skipped rather than started.
+# has no code for, and must be skipped rather than started. Device 2 has no
+# bus field, as an older backend prints it.
 write_amd_miner "$amd_only_root/bin/tari_c29_pool_miner_amd" \
-    '0\tAMD Radeon RX 7900 XTX\tgfx1100\n1\tAMD Radeon RX 6800\tgfx1030:xnack-\n2\tAMD Radeon Graphics\tgfx1036\n'
+    '0\tAMD Radeon RX 7900 XTX\tgfx1100\t03\n1\tAMD Radeon RX 6800\tgfx1030:xnack-\t0a\n2\tAMD Radeon Graphics\tgfx1036\n'
 run_launcher "$amd_only_root" TARI_DRY_RUN=1
 expect_status "$amd_only_root" 0 "AMD-only rig"
 expect_output "$amd_only_root" "NOTICE: nvidia-smi could not enumerate NVIDIA GPUs; starting AMD GPUs only." "AMD-only rig"
@@ -214,7 +216,7 @@ mixed_root="$(make_case mixed)"
 write_gpu_list "$mixed_root/nvidia-smi"
 write_nvidia_miner "$mixed_root/bin/tari_c29_pool_miner_sm_120"
 write_nvidia_miner "$mixed_root/bin/tari_c29_pool_miner_sm_89"
-write_amd_miner "$mixed_root/bin/tari_c29_pool_miner_amd" '0\tAMD Radeon RX 9070 XT\tgfx1201\n'
+write_amd_miner "$mixed_root/bin/tari_c29_pool_miner_amd" '0\tAMD Radeon RX 9070 XT\tgfx1201\t05\n'
 run_launcher "$mixed_root" TARI_DRY_RUN=1
 expect_status "$mixed_root" 0 "mixed rig"
 expect_output "$mixed_root" "--worker rig-gpu0" "mixed rig"

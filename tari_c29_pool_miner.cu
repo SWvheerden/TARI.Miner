@@ -657,7 +657,7 @@ static void usage() {
            "  --pipeline N            solver contexts to overlap GPU trim and CPU cycle search, default auto\n"
            "  --max-runtime-sec N     stop after N seconds (test helper)\n"
            "  --no-stale-skip         also search and submit work for a superseded block\n"
-           "  --list-devices          print index, name and arch of each GPU, then exit\n"
+           "  --list-devices          print index, name, arch and PCI bus of each GPU, then exit\n"
            "  --version               print version and exit\n"
            "tuning:\n"
            "  --ntrims N              even trim-round count, build default\n"
@@ -670,9 +670,11 @@ static void usage() {
            "  --recover-tpb N         recovery threads/block, default 1024\n");
 }
 
-// --list-devices: one line per GPU the runtime sees, "index<TAB>name<TAB>arch",
-// where arch is sm_XY on NVIDIA and the gfx name on AMD. start-c29.sh uses it
-// to find AMD GPUs. No GPU is not an error here: the list is just empty.
+// --list-devices: one line per GPU the runtime sees,
+// "index<TAB>name<TAB>arch<TAB>bus", where arch is sm_XY on NVIDIA and the gfx
+// name on AMD, and bus is the PCI bus number in two-digit hex. start-c29.sh
+// uses it to find AMD GPUs. No GPU is not an error here: the list is just
+// empty.
 static int list_devices() {
     int count = 0;
     cudaError_t rc = cudaGetDeviceCount(&count);
@@ -692,9 +694,9 @@ static int list_devices() {
             continue;
         }
 #if TARI_GPU_HIP
-        printf("%d\t%s\t%s\n", i, prop.name, prop.gcnArchName);
+        printf("%d\t%s\t%s\t%02x\n", i, prop.name, prop.gcnArchName, prop.pciBusID);
 #else
-        printf("%d\t%s\tsm_%d%d\n", i, prop.name, prop.major, prop.minor);
+        printf("%d\t%s\tsm_%d%d\t%02x\n", i, prop.name, prop.major, prop.minor, prop.pciBusID);
 #endif
     }
     return 0;
@@ -809,8 +811,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 #if TARI_GPU_HIP
-    printf("TARI.Miner C29 %s on %s (%.0f GB, %s)\n",
-           TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.gcnArchName);
+    // hiveos/h-stats.sh reads "bus XX" (PCI bus, hex) from this first log
+    // line to match the worker with the HiveOS GPU stats.
+    printf("TARI.Miner C29 %s on %s (%.0f GB, %s, bus %02x)\n",
+           TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.gcnArchName,
+           prop.pciBusID);
 #else
     printf("TARI.Miner C29 %s on %s (%.0f GB, sm_%d%d)\n",
            TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.major, prop.minor);

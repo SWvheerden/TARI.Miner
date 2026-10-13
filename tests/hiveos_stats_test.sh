@@ -186,7 +186,8 @@ check_stats() {
 }
 
 amd_root="$TEMP_ROOT/amd"
-mkdir -p "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/mixed-logs"
+mkdir -p "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/hidden-logs" \
+    "$amd_root/no-bus-logs" "$amd_root/mixed-logs"
 # HiveOS AMD rigs have an nvidia-smi that cannot reach a driver.
 cat > "$amd_root/bin/nvidia-smi" <<'EOF'
 #!/usr/bin/env bash
@@ -194,24 +195,45 @@ echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driv
 exit 9
 EOF
 chmod +x "$amd_root/bin/nvidia-smi"
-# A CPU entry comes first, then the two AMD GPUs; values as strings, as HiveOS
-# writes them.
+# A CPU entry first, then the two AMD GPUs out of bus order, one with a domain;
+# values as strings, as HiveOS writes them. Matching is by bus, not position.
 cat > "$amd_root/gpu-stats.json" <<'EOF'
-{"busids":["00:00.0","03:00.0","0000:04:00.0"],"brand":["cpu","amd","amd"],"temp":["0","55","57"],"fan":["0","30","35"]}
+{"busids":["00:00.0","04:00.0","0000:03:00.0"],"brand":["cpu","amd","amd"],"temp":["0","57","55"],"fan":["0","35","30"]}
 EOF
+# amd_log BUS: the AMD miner's first log line, which carries the PCI bus.
+amd_log() {
+    printf 'TARI.Miner C29 v0 on AMD Radeon RX 7900 XTX (24 GB, gfx1100, bus %s)\n' "$1"
+}
 amd_slow="${fixture/13.65 g\/s/9.00 g\/s}"
-printf '%s\n' "$fixture" > "$amd_root/amd-only-logs/amd0.log"
-printf '%s\n' "$amd_slow" > "$amd_root/amd-only-logs/amd1.log"
+{ amd_log 03; printf '%s\n' "$fixture"; } > "$amd_root/amd-only-logs/amd0.log"
+{ amd_log 04; printf '%s\n' "$amd_slow"; } > "$amd_root/amd-only-logs/amd1.log"
 check_stats "AMD-only rig" "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/gpu-stats.json" \
     '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[55,57]' '"fan":[30,35]' '"bus_numbers":[3,4]'
 check_stats "AMD-only rig without GPU stats" "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/missing.json" \
-    '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[0,0]' '"fan":[0,0]' '"bus_numbers":[0,0]'
+    '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[0,0]' '"fan":[0,0]' '"bus_numbers":[3,4]'
 
-# Mixed rig: NVIDIA GPU 0 from nvidia-smi and gpu0.log, then AMD GPU 0.
+# HIP_VISIBLE_DEVICES=1: HIP device 0 is the second AMD card, on bus 04.
+{ amd_log 04; printf '%s\n' "$amd_slow"; } > "$amd_root/hidden-logs/amd0.log"
+check_stats "AMD GPU renumbered by HIP_VISIBLE_DEVICES" "$amd_root/bin" "$amd_root/hidden-logs" "$amd_root/gpu-stats.json" \
+    '"hs":[9.000]' '"temp":[57]' '"fan":[35]' '"bus_numbers":[4]'
+
+# No bus in the log yet: 0s, never the stats of whichever card is first.
+printf '%s\n' "$fixture" > "$amd_root/no-bus-logs/amd0.log"
+check_stats "AMD log without a bus" "$amd_root/bin" "$amd_root/no-bus-logs" "$amd_root/gpu-stats.json" \
+    '"hs":[13.650]' '"temp":[0]' '"fan":[0]' '"bus_numbers":[0]'
+
+# Mixed rig: NVIDIA GPU 0 (bus 01, from nvidia-smi) and AMD GPU 0 (bus 03).
+# Both report bus_numbers the same way, as decimal bus numbers.
 printf '%s\n' "$fixture" > "$amd_root/mixed-logs/gpu0.log"
-printf '%s\n' "$amd_slow" > "$amd_root/mixed-logs/amd0.log"
+{ amd_log 03; printf '%s\n' "$amd_slow"; } > "$amd_root/mixed-logs/amd0.log"
 check_stats "mixed rig" "$TEMP_ROOT/bin" "$amd_root/mixed-logs" "$amd_root/gpu-stats.json" \
     '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[61,55]' '"fan":[45,30]' '"bus_numbers":[1,3]'
+
+# The AMD miner prints the bus in the format matched above.
+if ! grep -qF 'printf("TARI.Miner C29 %s on %s (%.0f GB, %s, bus %02x)\n",' "$ROOT/tari_c29_pool_miner.cu"; then
+    echo "FAIL the AMD startup line format in tari_c29_pool_miner.cu changed" >&2
+    fail=1
+fi
 
 # nvidia-smi exits non-zero when it lost a GPU but still lists the others:
 # those must still be reported, and its error line ignored.

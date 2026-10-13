@@ -40,8 +40,9 @@ version (`cat /opt/rocm/.info/version`).
 bin/tari_c29_pool_miner_amd --list-devices
 ```
 
-Expect one line per AMD GPU, `index<TAB>name<TAB>gfx name`, for example
-`0	AMD Radeon RX 7900 XTX	gfx1100`, and exit code 0. With no usable GPU
+Expect one line per AMD GPU, `index<TAB>name<TAB>gfx name<TAB>PCI bus`
+(bus in hex), for example `0	AMD Radeon RX 7900 XTX	gfx1100	03`, and exit
+code 0. With no usable GPU
 it prints nothing on stdout and `no HIP GPU devices found: ...` on stderr.
 Use the index in `--device N` below (default 0).
 
@@ -100,36 +101,25 @@ from the same `tests/tari_c29_gpu_recall.py run` command run on an NVIDIA card
 uses 50). Save it as `validation/nvidia-reference.jsonl`. Without that file
 this gate has not been run: report it as NOT RUN, not as passed.
 
-Compare both AMD 50-round runs from gate 4a with it:
+Compare both AMD 50-round runs from gate 4a with it. `compare-proofs`
+checks that the files cover the same graphs (mining hash, start nonce, count)
+with the same trim rounds, that the NVIDIA file holds at least one proof, and
+that both hold exactly the same set of proofs (each a nonce and its 42
+edges). The GPU architectures may differ. It needs nothing beyond Python 3:
 
 ```bash
 run_dir="$(ls -d validation/recall-* | tail -n 1)"
-proofs() {
-  jq -c 'select(.type == "cycle") | [.nonce, .edges]' "$1" | sort
-}
-settings() {
-  jq -c 'select(.type == "run") | [.mining_hash, .start_nonce, .count, .ntrims]' "$1"
-}
-settings validation/nvidia-reference.jsonl
-proofs validation/nvidia-reference.jsonl > nvidia.proofs
-wc -l < nvidia.proofs
 for label in candidate-p1-a reference-p1-a; do
-  settings "$run_dir/$label.jsonl"
-  proofs "$run_dir/$label.jsonl" > "amd-$label.proofs"
-  if diff -q nvidia.proofs "amd-$label.proofs" > /dev/null; then
-    echo "gate 4b $label: PASS"
-  else
-    echo "gate 4b $label: FAIL"
-    diff nvidia.proofs "amd-$label.proofs" | head -20
-  fi
+  python3 tests/tari_c29_gpu_recall.py compare-proofs \
+    --reference validation/nvidia-reference.jsonl \
+    --candidate "$run_dir/$label.jsonl"
+  echo "gate 4b $label: exit $?"
 done
 ```
 
-Pass: every `settings` line is identical (same mining hash, start nonce,
-count, and 50 trim rounds), `nvidia.proofs` is not empty, and both lines say
-`PASS`, meaning the AMD runs found exactly the same set of proofs (nonce and
-42 edges each) as the NVIDIA run. Anything else is a FAIL: report the
-`diff` output.
+Pass: both commands print `PASS: N identical proofs ...` and exit 0. Any
+`FAIL:` line (it names the setting that differs, or how many proofs are only
+on one side with samples) or a non-zero exit is a FAIL: report the output.
 
 ## Step 5: speed
 
@@ -238,7 +228,7 @@ It should print `AMD GPU 0 [...] gfx... -> amd, worker <host>-amd0` and a
    `hipcc --version`, kernel and distribution; CPU model and core count.
 2. Step 3: the full solver output.
 3. Step 4: gate 4a PASS or FAIL with `report.json`; gate 4b PASS, FAIL or
-   NOT RUN with the `settings` lines, the proof count and any `diff` output;
+   NOT RUN with the full `compare-proofs` output;
    and `candidate-p1-a.jsonl` and `reference-p1-a.jsonl`.
 4. Step 5: the pipeline depth, the three graphs/s values, and `stage-ms.txt`.
 5. Step 6: the miner's exit code, the first 20 lines and the last speed report

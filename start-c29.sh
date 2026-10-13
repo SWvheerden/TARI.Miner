@@ -67,13 +67,14 @@ backend_arch() {
 }
 
 # AMD GPUs come from the AMD backend itself: it prints one
-# "index<TAB>name<TAB>arch" line per GPU the HIP runtime sees. Without the
+# "index<TAB>name<TAB>arch<TAB>bus" line per GPU the HIP runtime sees (older
+# builds print no bus field). Without the
 # backend, or when it cannot run (no ROCm runtime), the rig has no AMD GPUs.
 amd_output=""
 amd_detected=0
 if [[ -x "$TARI_AMD_MINER" ]]; then
     if amd_output="$("$TARI_AMD_MINER" --list-devices 2>/dev/null)"; then
-        while IFS=$'\t' read -r raw_index raw_name raw_arch; do
+        while IFS=$'\t' read -r raw_index raw_name raw_arch raw_bus; do
             if [[ "$raw_index" =~ ^[0-9]+$ ]]; then
                 amd_detected=$((amd_detected + 1))
             fi
@@ -160,7 +161,7 @@ nvidia_detected="$detected"
 
 # AMD workers are named -amd<index> and log to amd<index>.log, so they never
 # collide with the NVIDIA -gpu<index> workers.
-while IFS=$'\t' read -r raw_index raw_name raw_arch; do
+while IFS=$'\t' read -r raw_index raw_name raw_arch raw_bus; do
     [[ "$raw_index" =~ ^[0-9]+$ ]] || continue
     detected=$((detected + 1))
     index="$raw_index"
