@@ -45,6 +45,14 @@ Expect one line per AMD GPU, `index<TAB>name<TAB>gfx name`, for example
 it prints nothing on stdout and `no HIP GPU devices found: ...` on stderr.
 Use the index in `--device N` below (default 0).
 
+The list can include GPUs the backend does not support, such as the
+integrated graphics of a Ryzen CPU (gfx1036, gfx1103, gfx115x) or an RX 6400
+or 6500 (gfx1034). `start-c29.sh` skips those with a warning. If the HIP
+runtime itself fails or misbehaves because of such a GPU, hide it with
+`HIP_VISIBLE_DEVICES`, a comma-separated list of the device indexes the
+runtime may use, for example `export HIP_VISIBLE_DEVICES=0`. Indexes are then
+renumbered from 0.
+
 ## Step 3: smoke test
 
 ```bash
@@ -56,13 +64,20 @@ The first line names the GPU and its gfx name. The run must end with
 `fatal:` line, a `GPUassert`, or `this build needs 32-lane wavefronts` is a
 failure: stop and report the full output.
 
-## Step 4: exact recall against the reference build
+## Step 4: exact recall (two gates, both required)
 
-This is the correctness gate. It runs the release (candidate) and the
-conservative reference build twice each on 4,200 fixed graphs, plus the
-candidate at pipeline 2, and requires every run to find the same set of
-proofs. Every proof is also checked by the solver's CPU verifier and again by
-the script's own Python packing and hashing:
+Both gates must pass before the AMD build counts as correct. Gate 4a compares
+AMD builds with each other; it cannot catch a bug they share (both use the
+same HIP warp helpers and siphash code). Gate 4b compares the AMD proofs with
+proofs found on an NVIDIA GPU, which catches that.
+
+### Gate 4a: AMD release against the AMD reference build
+
+This runs the release (candidate) and the conservative reference build twice
+each on 4,200 fixed graphs, plus the candidate at pipeline 2, and requires
+every run to find the same set of proofs. Every proof is also checked by the
+solver's CPU verifier and again by the script's own Python packing and
+hashing:
 
 ```bash
 unset TARI_ARCH_FLAGS
@@ -72,19 +87,49 @@ python3 tests/tari_c29_gpu_recall.py run \
   --arch amd --device 0 --output-dir validation --parity-pipeline 2
 ```
 
-It prints `PASS` or `FAIL` and writes `validation/recall-*/report.json` with
-the raw logs and JSONL proof records. A failure is a result too: keep the
-directory and report it.
+Pass: it prints `PASS` and exits 0. It writes `validation/recall-*/` with
+`report.json`, the raw logs and the JSONL proof records. A failure is a result
+too: keep the directory and report it.
 
-The proof set should also match an NVIDIA run of the same graphs (default
-mining hash, nonces 0 to 4199, 50 trim rounds). Return
-`validation/recall-*/candidate-p1-a.jsonl`; the maintainer compares it with
-an NVIDIA recall file using:
+### Gate 4b: AMD proofs against NVIDIA proofs
+
+The maintainer supplies the NVIDIA proofs: the `reference-p1-a.jsonl` file
+from the same `tests/tari_c29_gpu_recall.py run` command run on an NVIDIA card
+(for example `--arch sm_89`) with the same defaults: default mining hash,
+`--nonce 0`, `--count 4200`, and 50 trim rounds (the reference build always
+uses 50). Save it as `validation/nvidia-reference.jsonl`. Without that file
+this gate has not been run: report it as NOT RUN, not as passed.
+
+Compare both AMD 50-round runs from gate 4a with it:
 
 ```bash
-jq -c 'select(.type == "cycle") | [.nonce, .edges]' FILE.jsonl | sort > FILE.proofs
-diff amd.proofs nvidia.proofs && echo "identical proofs"
+run_dir="$(ls -d validation/recall-* | tail -n 1)"
+proofs() {
+  jq -c 'select(.type == "cycle") | [.nonce, .edges]' "$1" | sort
+}
+settings() {
+  jq -c 'select(.type == "run") | [.mining_hash, .start_nonce, .count, .ntrims]' "$1"
+}
+settings validation/nvidia-reference.jsonl
+proofs validation/nvidia-reference.jsonl > nvidia.proofs
+wc -l < nvidia.proofs
+for label in candidate-p1-a reference-p1-a; do
+  settings "$run_dir/$label.jsonl"
+  proofs "$run_dir/$label.jsonl" > "amd-$label.proofs"
+  if diff -q nvidia.proofs "amd-$label.proofs" > /dev/null; then
+    echo "gate 4b $label: PASS"
+  else
+    echo "gate 4b $label: FAIL"
+    diff nvidia.proofs "amd-$label.proofs" | head -20
+  fi
+done
 ```
+
+Pass: every `settings` line is identical (same mining hash, start nonce,
+count, and 50 trim rounds), `nvidia.proofs` is not empty, and both lines say
+`PASS`, meaning the AMD runs found exactly the same set of proofs (nonce and
+42 edges each) as the NVIDIA run. Anything else is a FAIL: report the
+`diff` output.
 
 ## Step 5: speed
 
@@ -192,7 +237,9 @@ It should print `AMD GPU 0 [...] gfx... -> amd, worker <host>-amd0` and a
 1. GPU model, gfx name, VRAM; `--list-devices` output; ROCm version,
    `hipcc --version`, kernel and distribution; CPU model and core count.
 2. Step 3: the full solver output.
-3. Step 4: PASS or FAIL, `report.json`, and `candidate-p1-a.jsonl`.
+3. Step 4: gate 4a PASS or FAIL with `report.json`; gate 4b PASS, FAIL or
+   NOT RUN with the `settings` lines, the proof count and any `diff` output;
+   and `candidate-p1-a.jsonl` and `reference-p1-a.jsonl`.
 4. Step 5: the pipeline depth, the three graphs/s values, and `stage-ms.txt`.
 5. Step 6: the miner's exit code, the first 20 lines and the last speed report
    of `miner.log`, and the submit count from `stub.log`.

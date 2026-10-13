@@ -98,10 +98,13 @@ accepted=0
 rejected=0
 now="$(date +%s)"
 
-# On a rig without NVIDIA GPUs nvidia-smi may be missing, or print an error to
-# stdout and fail; then there is nothing to read.
-nvidia_output="$(nvidia-smi --query-gpu=index,compute_cap,pci.bus_id,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null)" || nvidia_output=""
+# nvidia-smi can exit non-zero and still list the GPUs it can reach (one GPU
+# lost), or print only an error on a rig without NVIDIA GPUs. Keep its output
+# either way: error lines have no supported compute capability and are skipped.
+nvidia_output="$(nvidia-smi --query-gpu=index,compute_cap,pci.bus_id,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null || true)"
 while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
+    # Skip error text before xargs sees it (it rejects unbalanced quotes).
+    [[ "${raw_index:-}" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || continue
     index="$(xargs <<< "${raw_index:-}")"
     cap="$(xargs <<< "${raw_cap:-}")"
     bus="$(xargs <<< "${raw_bus:-}")"

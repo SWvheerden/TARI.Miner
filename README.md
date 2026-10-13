@@ -55,7 +55,11 @@ The Linux and HiveOS starters run `bin/tari_c29_pool_miner_amd --list-devices`
 to find AMD GPUs and start one worker per GPU, named like `RIG01-amd0`, next to
 the NVIDIA workers on a mixed rig. `TARI_AMD_DEVICES=0,2` selects AMD GPUs by
 the index `--list-devices` prints; `TARI_DEVICES` keeps selecting NVIDIA GPUs.
-A rig with only AMD GPUs does not need `nvidia-smi`.
+A rig with only AMD GPUs does not need `nvidia-smi`. GPUs the backend has no
+code for, such as the integrated graphics of a Ryzen CPU or an RX 6400/6500
+(gfx1034), are skipped with a warning. If the HIP runtime itself has trouble
+with such a GPU, hide it with `HIP_VISIBLE_DEVICES`, for example
+`HIP_VISIBLE_DEVICES=0`; the remaining GPUs are then renumbered from 0.
 
 Please report results, good or bad, as a GitHub issue: the GPU model, the
 ROCm version, the `--list-devices` output, the first lines of the miner log,

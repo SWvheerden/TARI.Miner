@@ -151,8 +151,10 @@ rm -f -- "$SURVIVOR_PID_FILE"
 # AMD-only rig without nvidia-smi: NVIDIA is skipped with a notice and one
 # worker starts per AMD GPU, named -amd<index>.
 amd_only_root="$(make_case amd-only)"
+# Device 1 reports a feature suffix; device 2 is an integrated GPU the backend
+# has no code for, and must be skipped rather than started.
 write_amd_miner "$amd_only_root/bin/tari_c29_pool_miner_amd" \
-    '0\tAMD Radeon RX 7900 XTX\tgfx1100\n1\tAMD Radeon RX 6800\tgfx1030\n'
+    '0\tAMD Radeon RX 7900 XTX\tgfx1100\n1\tAMD Radeon RX 6800\tgfx1030:xnack-\n2\tAMD Radeon Graphics\tgfx1036\n'
 run_launcher "$amd_only_root" TARI_DRY_RUN=1
 expect_status "$amd_only_root" 0 "AMD-only rig"
 expect_output "$amd_only_root" "NOTICE: nvidia-smi could not enumerate NVIDIA GPUs; starting AMD GPUs only." "AMD-only rig"
@@ -160,6 +162,26 @@ expect_output "$amd_only_root" "tari_c29_pool_miner_amd --device 0 " "AMD-only r
 expect_output "$amd_only_root" "--worker rig-amd0" "AMD-only rig"
 expect_output "$amd_only_root" "--worker rig-amd1" "AMD-only rig"
 expect_output "$amd_only_root" "AMD GPU 1 [AMD Radeon RX 6800] gfx1030 -> amd, worker rig-amd1" "AMD-only rig"
+expect_output "$amd_only_root" "WARNING: Skipping AMD GPU 2 [AMD Radeon Graphics]: gfx1036 is not supported." "AMD-only rig"
+expect_no_output "$amd_only_root" "--worker rig-amd2" "AMD-only rig"
+expect_output "$amd_only_root" "Started 2 miner worker(s) from 0 detected NVIDIA GPU(s) and 3 detected AMD GPU(s)." "AMD-only rig"
+
+# Only an unsupported AMD GPU: nothing to start, as for an unsupported NVIDIA GPU.
+igpu_root="$(make_case amd-igpu-only)"
+write_amd_miner "$igpu_root/bin/tari_c29_pool_miner_amd" '0\tAMD Radeon 780M\tgfx1103\n'
+run_launcher "$igpu_root" TARI_DRY_RUN=1
+expect_status "$igpu_root" 4 "unsupported AMD GPU only"
+expect_output "$igpu_root" "WARNING: Skipping AMD GPU 0 [AMD Radeon 780M]: gfx1103 is not supported." "unsupported AMD GPU only"
+
+# The launcher's supported list must match the targets the build compiles.
+launcher_arches="$(sed -n 's/^AMD_SUPPORTED_ARCHES="\(.*\)"$/\1/p' "$ROOT/start-c29.sh")"
+for script in build_solver.sh build_pool_miner.sh; do
+    build_arches="$(sed -n 's/^AMD_OFFLOAD_ARCHES="\${AMD_OFFLOAD_ARCHES:-\(.*\)}"$/\1/p' "$ROOT/$script")"
+    if [[ -z "$launcher_arches" || "$launcher_arches" != "$build_arches" ]]; then
+        echo "AMD_SUPPORTED_ARCHES [$launcher_arches] in start-c29.sh differs from $script [$build_arches]" >&2
+        exit 1
+    fi
+done
 
 # TARI_AMD_DEVICES selects AMD GPUs; TARI_DEVICES does not apply to them.
 run_launcher "$amd_only_root" TARI_DRY_RUN=1 TARI_AMD_DEVICES=1 TARI_DEVICES=0

@@ -213,6 +213,21 @@ printf '%s\n' "$amd_slow" > "$amd_root/mixed-logs/amd0.log"
 check_stats "mixed rig" "$TEMP_ROOT/bin" "$amd_root/mixed-logs" "$amd_root/gpu-stats.json" \
     '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[61,55]' '"fan":[45,30]' '"bus_numbers":[1,3]'
 
+# nvidia-smi exits non-zero when it lost a GPU but still lists the others:
+# those must still be reported, and its error line ignored.
+partial_root="$TEMP_ROOT/partial"
+mkdir -p "$partial_root/bin" "$partial_root/logs"
+cat > "$partial_root/bin/nvidia-smi" <<'EOF'
+#!/usr/bin/env bash
+printf '0, 8.9, 00000000:01:00.0, 61, 45\n'
+echo "Unable to determine the device handle for GPU0000:02:00.0: Unknown Error. It's lost."
+exit 15
+EOF
+chmod +x "$partial_root/bin/nvidia-smi"
+printf '%s\n' "$fixture" > "$partial_root/logs/gpu0.log"
+check_stats "nvidia-smi lost a GPU" "$partial_root/bin" "$partial_root/logs" "$amd_root/missing.json" \
+    '"hs":[13.650]' '"ar":[2,1]' '"temp":[61]' '"fan":[45]' '"bus_numbers":[1]'
+
 # h-stats.sh relies on pool text never starting a log line. The miner
 # prints pool text only at these call sites, each after a fixed prefix. A new
 # sanitize_for_terminal call must be checked the same way and added here.

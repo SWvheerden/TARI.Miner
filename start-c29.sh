@@ -40,6 +40,15 @@ device_selected() {
     [[ "${TARI_DEVICES,,}" == "all" || "$requested" == *",$index,"* ]]
 }
 
+# gfx targets the AMD backend is built for. Keep this list the same as the
+# default AMD_OFFLOAD_ARCHES in build_solver.sh and build_pool_miner.sh
+# (tests/start_c29_launcher_test.sh checks it).
+AMD_SUPPORTED_ARCHES="gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201"
+
+amd_arch_supported() {
+    [[ " $AMD_SUPPORTED_ARCHES " == *" $1 "* ]]
+}
+
 # TARI_AMD_DEVICES selects AMD GPUs by their HIP index, as TARI_DEVICES
 # selects NVIDIA GPUs by their nvidia-smi index.
 amd_device_selected() {
@@ -157,8 +166,15 @@ while IFS=$'\t' read -r raw_index raw_name raw_arch; do
     index="$raw_index"
     name="$(trim "$raw_name")"
     arch="$(trim "$raw_arch")"
+    arch="${arch%%:*}" # drop feature flags such as gfx1030:xnack-
 
     amd_device_selected "$index" || continue
+    # An integrated GPU or another target the backend has no code for would
+    # fail its worker, and that stops every other worker too.
+    if ! amd_arch_supported "$arch"; then
+        echo "WARNING: Skipping AMD GPU $index [$name]: $arch is not supported." >&2
+        continue
+    fi
 
     amd_worker="$TARI_WORKER-amd$index"
     echo "AMD GPU $index [$name] $arch -> amd, worker $amd_worker"

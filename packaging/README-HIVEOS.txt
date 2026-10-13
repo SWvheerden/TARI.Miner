@@ -86,6 +86,14 @@ arguments (TARI_DEVICES selects NVIDIA GPUs only):
 
   TARI_AMD_DEVICES=0,2
 
+Unsupported AMD GPUs, such as Ryzen integrated graphics or an RX 6400/6500
+(gfx1034), are skipped with a warning. If the HIP runtime itself has trouble
+with one, hide it by adding a token such as this to Extra config arguments
+(a comma-separated list of the device indexes to use; they are then
+renumbered from 0):
+
+  HIP_VISIBLE_DEVICES=0
+
 AMD graph rates and share counters come from the miner logs. Temperatures and
 fans come from the HiveOS agent's GPU stats, matched in bus order; without
 them they show as 0.

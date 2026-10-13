@@ -148,8 +148,8 @@ jobs:
           "$solver" --version || exit 1
           "$solver" --help > /dev/null || exit 1
 
-          "$miner" --list-devices > /tmp/list.out 2> /tmp/list.err
-          status=$?
+          status=0
+          "$miner" --list-devices > /tmp/list.out 2> /tmp/list.err || status=$?
           echo "--list-devices exit $status"; cat /tmp/list.out /tmp/list.err
           if ((status != 0)); then
             echo "::error::--list-devices exited $status without a GPU; expected 0"
@@ -161,8 +161,8 @@ jobs:
           fi
           grep -qF "no HIP GPU devices found" /tmp/list.err || { echo "::error::--list-devices gave no clear no-device message"; exit 1; }
 
-          "$solver" --count 1 > /tmp/solver.out 2> /tmp/solver.err
-          status=$?
+          status=0
+          "$solver" --count 1 > /tmp/solver.out 2> /tmp/solver.err || status=$?
           echo "solver exit $status"; cat /tmp/solver.out /tmp/solver.err
           if ((status != 1)); then
             echo "::error::the solver exited $status without a GPU; expected 1"

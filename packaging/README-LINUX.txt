@@ -52,6 +52,10 @@ The starter finds AMD GPUs itself and starts one worker per GPU, named with
 -amd0, -amd1, and so on, next to any NVIDIA workers. Select AMD GPUs with
 TARI_AMD_DEVICES=0,2 (TARI_DEVICES selects NVIDIA GPUs only). A rig with only
 AMD GPUs does not need nvidia-smi.
+Unsupported AMD GPUs, such as Ryzen integrated graphics or an RX 6400/6500
+(gfx1034), are skipped with a warning. If the HIP runtime itself has trouble
+with one, hide it with HIP_VISIBLE_DEVICES=0 (a comma-separated list of the
+device indexes to use; they are then renumbered from 0).
 
 Please report AMD results, good or bad, as a GitHub issue with the GPU model,
 the ROCm version, the --list-devices output, the first lines of the miner log
