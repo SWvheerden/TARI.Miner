@@ -41,6 +41,9 @@ env:
   LINUX_CUDA: 12.8.0
   WINDOWS_CUDA: 13.2.0
   ARCHES: sm_86 sm_89 sm_120
+  # The AMD (HIP) binaries ship in the Linux and HiveOS packages only. Same
+  # ROCm release as ci.yml's HIP build job.
+  LINUX_ROCM: 7.2.4
 
 jobs:
   resolve:
@@ -208,6 +211,57 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  amd:
+    name: Build Linux AMD backends
+    needs: resolve
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-22.04:7.2.4@sha256:a50a8547101ac9e7c35848ff609a56335214b789b468c9eb05dcd006a4a38c25
+    defaults:
+      run:
+        shell: bash
+    env:
+      HIPCC: /opt/rocm/bin/hipcc
+    steps:
+      - name: Install checkout prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Build the shipped AMD solver and pool miner
+        run: |
+          set -euo pipefail
+          "$HIPCC" --version
+          ./build_solver.sh amd
+          ./build_pool_miner.sh amd
+
+      - name: Check every packaged AMD binary is present and starts
+        run: |
+          set -euo pipefail
+          for program in tari_c29_pool_miner tari_c29_solver; do
+            test -f "bin/${program}_amd" || {
+              echo "::error::Missing bin/${program}_amd"
+              exit 1
+            }
+            "bin/${program}_amd" --version
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: amd-binaries
+          path: |
+            bin/tari_c29_pool_miner_amd
+            bin/tari_c29_solver_amd
+          if-no-files-found: error
+          retention-days: 7
+
   windows:
     name: Build Windows backends
     needs: resolve
@@ -274,7 +328,7 @@ jobs:
 
   package:
     name: Package and publish
-    needs: [resolve, linux, windows]
+    needs: [resolve, linux, amd, windows]
     runs-on: ubuntu-latest
     permissions:
       # Only this job writes; the build jobs stay read-only.
@@ -290,6 +344,11 @@ jobs:
         with:
           name: linux-binaries
           path: linux-bin
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: amd-binaries
+          path: amd-bin
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -317,19 +376,36 @@ jobs:
           install -m 644 LICENSE THIRD_PARTY_NOTICES.md "$linux/"
           install -m 755 start-c29.sh "$linux/"
           install -m 755 linux-bin/* "$linux/bin/"
+          install -m 755 amd-bin/* "$linux/bin/"
 
           install -m 644 packaging/README-HIVEOS.txt "$hive/README.txt"
           install -m 644 LICENSE THIRD_PARTY_NOTICES.md hiveos/h-manifest.conf "$hive/"
           install -m 755 start-c29.sh hiveos/h-config.sh hiveos/h-run.sh hiveos/h-stats.sh "$hive/"
           install -m 755 linux-bin/* "$hive/bin/"
+          install -m 755 amd-bin/* "$hive/bin/"
 
-          for staged in "$windows" "$linux" "$hive"; do
-            count="$(find "$staged/bin" -type f | wc -l)"
-            if [ "$count" -ne 6 ]; then
-              echo "::error::$staged/bin holds $count binaries, expected 6"
+          # Six NVIDIA binaries everywhere; Linux and HiveOS add the two AMD ones.
+          for staged in "$windows:6" "$linux:8" "$hive:8"; do
+            dir="${staged%:*}"
+            expected="${staged##*:}"
+            count="$(find "$dir/bin" -type f | wc -l)"
+            if [ "$count" -ne "$expected" ]; then
+              echo "::error::$dir/bin holds $count binaries, expected $expected"
               exit 1
             fi
           done
+          for dir in "$linux" "$hive"; do
+            for program in tari_c29_pool_miner tari_c29_solver; do
+              test -f "$dir/bin/${program}_amd" || {
+                echo "::error::Missing $dir/bin/${program}_amd"
+                exit 1
+              }
+            done
+          done
+          if find "$windows/bin" -name '*amd*' | grep -q .; then
+            echo "::error::An AMD binary was staged in the Windows package"
+            exit 1
+          fi
 
       # Package byte layout and timestamps are normalized. The binaries
       # themselves are whatever nvcc emitted, so compilation is not claimed to

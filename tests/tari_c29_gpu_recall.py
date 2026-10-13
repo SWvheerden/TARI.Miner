@@ -53,7 +53,9 @@ PACKED_BYTES = (PROOF_SIZE * EDGE_BITS + 7) // 8
 MAX_U64 = (1 << 64) - 1
 MAX_U256 = (1 << 256) - 1
 DEFAULT_MINING_HASH = "".join("{:02x}".format(i) for i in range(32))
-SUPPORTED_ARCHES = ("sm_86", "sm_89", "sm_120")
+# "amd" is the HIP build: one binary for every supported gfx target, which
+# also reports its device as "amd".
+SUPPORTED_ARCHES = ("sm_86", "sm_89", "sm_120", "amd")
 REFERENCE_NTRIMS = 50
 BUILD_FLAGS_DIR = Path(__file__).resolve().parent.parent / "build_flags"
 ARCH_FLAGS_ENV = "TARI_ARCH_FLAGS"
@@ -492,10 +494,21 @@ def load_recall(path: Path, log_path: Optional[Path] = None) -> RecallDataset:
     )
 
 
+# Settings two recall files must share to be compared. compare_recall()
+# requires the same build and GPU architecture too; compare_proof_sets()
+# compares builds for different GPUs (AMD against NVIDIA), so it checks the
+# graph set and trim rounds only.
+SAME_BUILD_KEYS = ("mining_hash", "start_nonce", "count", "arch", "device_arch")
+CROSS_BUILD_KEYS = ("mining_hash", "start_nonce", "count", "ntrims")
+
+
 def compare_recall(
-    left: RecallDataset, right: RecallDataset, label: str = "recall"
+    left: RecallDataset,
+    right: RecallDataset,
+    label: str = "recall",
+    keys: Sequence[str] = SAME_BUILD_KEYS,
 ) -> Dict[str, object]:
-    for key in ("mining_hash", "start_nonce", "count", "arch", "device_arch"):
+    for key in keys:
         if left.metadata[key] != right.metadata[key]:
             raise RecallError(
                 "{} comparison metadata mismatch for {}: {!r} != {!r}".format(
@@ -533,6 +546,25 @@ def compare_recall(
         "left": str(left.path),
         "right": str(right.path),
     }
+
+
+def compare_proof_sets(
+    reference: RecallDataset, candidate: RecallDataset
+) -> Dict[str, object]:
+    """Exact proof-set comparison across GPU vendors or architectures.
+
+    Passes only when both files cover the same graphs with the same trim
+    rounds, the reference holds at least one proof, and the two sets of
+    (nonce, proof) pairs are identical.
+    """
+    if not reference.proofs:
+        raise RecallError(
+            "reference {} holds no proofs; it cannot show the candidate is "
+            "correct".format(reference.path)
+        )
+    return compare_recall(
+        reference, candidate, "reference/candidate proofs", CROSS_BUILD_KEYS
+    )
 
 
 def _dataset_report(dataset: RecallDataset) -> Dict[str, object]:
@@ -975,6 +1007,10 @@ def self_test() -> int:
         "sm_86 release ntrims",
     )
     check(
+        release_compiled_ntrims("amd", environ=no_env) == 50,
+        "amd release ntrims",
+    )
+    check(
         release_compiled_ntrims("sm_75", environ=no_env) == 50,
         "arch without a flags file uses the default",
     )
@@ -1095,6 +1131,94 @@ def self_test() -> int:
         expect_recall_error(
             lambda: load_recall(wrong_release_default),
             "expected 48",
+        )
+
+        amd = root / "amd.jsonl"
+        _write_fixture(
+            amd,
+            edges,
+            ntrims=50,
+            compiled_ntrims=50,
+            arch="amd",
+            device_arch="amd",
+        )
+        amd_dataset = load_recall(amd)
+        check(amd_dataset.metadata["arch"] == "amd", "amd build metadata")
+        expect_recall_error(
+            lambda: compare_recall(dataset, amd_dataset, "NVIDIA/AMD"),
+            "arch",
+        )
+
+        # compare-proofs: AMD against NVIDIA. Settings, not arch, must match.
+        def proof_set(
+            proofs: Iterable[Tuple[int, str]], **settings: object
+        ) -> RecallDataset:
+            metadata: Dict[str, object] = {
+                "mining_hash": DEFAULT_MINING_HASH,
+                "start_nonce": 0,
+                "count": 4200,
+                "ntrims": 50,
+                "arch": "sm_89",
+                "device_arch": "sm_89",
+            }
+            metadata.update(settings)
+            return RecallDataset(
+                path=root / "proof-set.jsonl",
+                metadata=metadata,
+                summary={},
+                proofs=frozenset(
+                    ProofIdentity(nonce=nonce, proof_hash=digest)
+                    for nonce, digest in proofs
+                ),
+            )
+
+        nvidia = proof_set([(3, "aa"), (9, "bb")])
+        amd_same = proof_set([(9, "bb"), (3, "aa")], arch="amd", device_arch="amd")
+        check(
+            compare_proof_sets(nvidia, amd_same)["proof_count"] == 2,
+            "compare-proofs: identical sets pass across arches",
+        )
+        expect_recall_error(
+            lambda: compare_proof_sets(nvidia, proof_set([(3, "aa")], arch="amd")),
+            "1 proof(s) only on left",
+        )
+        expect_recall_error(
+            lambda: compare_proof_sets(
+                nvidia, proof_set([(3, "aa"), (9, "bb"), (12, "cc")], arch="amd")
+            ),
+            "1 only on right",
+        )
+        expect_recall_error(
+            lambda: compare_proof_sets(
+                nvidia, proof_set([(3, "aa"), (9, "cc")], arch="amd")
+            ),
+            "mismatch",
+        )
+        for key, value in (
+            ("mining_hash", "11" * 32),
+            ("start_nonce", 1),
+            ("count", 4199),
+            ("ntrims", 48),
+        ):
+            expect_recall_error(
+                lambda key=key, value=value: compare_proof_sets(
+                    nvidia, proof_set([(3, "aa"), (9, "bb")], **{key: value})
+                ),
+                "mismatch for " + key,
+            )
+        expect_recall_error(
+            lambda: compare_proof_sets(proof_set([]), proof_set([])),
+            "holds no proofs",
+        )
+        check(
+            main(["compare-proofs", "--reference", str(valid), "--candidate", str(amd)])
+            == 1,
+            "compare-proofs CLI fails on different trim rounds",
+        )
+        check(
+            main(["compare-proofs", "--reference", str(valid), "--candidate", str(clone)])
+            == 0,
+            "compare-proofs CLI passes on identical files",
         )
 
         reference = root / "reference.jsonl"
@@ -1307,6 +1431,16 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--left-log", type=Path)
     compare_parser.add_argument("--right-log", type=Path)
 
+    proofs_parser = subparsers.add_parser(
+        "compare-proofs",
+        help=(
+            "check a candidate finds exactly the reference's proofs, across "
+            "GPU vendors (same graphs and trim rounds; arch may differ)"
+        ),
+    )
+    proofs_parser.add_argument("--reference", required=True, type=Path)
+    proofs_parser.add_argument("--candidate", required=True, type=Path)
+
     run_parser = subparsers.add_parser(
         "run", help="run the complete five-invocation GPU recall sequence"
     )
@@ -1374,6 +1508,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             right = load_recall(args.right, args.right_log)
             result = compare_recall(left, right, "exact recall")
             print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if args.command == "compare-proofs":
+            reference = load_recall(args.reference)
+            candidate = load_recall(args.candidate)
+            result = compare_proof_sets(reference, candidate)
+            print(
+                "PASS: {} identical proofs in {} and {}".format(
+                    result["proof_count"], args.reference, args.candidate
+                )
+            )
             return 0
         if args.command == "run":
             if args.device < 0:

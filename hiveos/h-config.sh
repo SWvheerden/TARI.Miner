@@ -30,6 +30,8 @@ pool="${pool%${pool##*[![:space:]]}}"
 worker="${TARI_WORKER:-${template_worker:-${WORKER_NAME:-$(hostname)}}}"
 password="${TARI_PASS:-${CUSTOM_PASS:-x}}"
 devices="${TARI_DEVICES:-all}"
+amd_devices="${TARI_AMD_DEVICES:-all}"
+hip_visible_devices="${HIP_VISIBLE_DEVICES:-}"
 raw_extra=()
 extra_args=()
 if [[ -n "${CUSTOM_USER_CONFIG:-}" ]]; then
@@ -38,6 +40,8 @@ fi
 for token in "${raw_extra[@]}"; do
     case "$token" in
         TARI_DEVICES=*) devices="${token#TARI_DEVICES=}" ;;
+        TARI_AMD_DEVICES=*) amd_devices="${token#TARI_AMD_DEVICES=}" ;;
+        HIP_VISIBLE_DEVICES=*) hip_visible_devices="${token#HIP_VISIBLE_DEVICES=}" ;;
         *) extra_args+=("$token") ;;
     esac
 done
@@ -48,6 +52,11 @@ done
     printf 'TARI_WORKER=%q\n' "$worker"
     printf 'TARI_PASS=%q\n' "$password"
     printf 'TARI_DEVICES=%q\n' "$devices"
+    printf 'TARI_AMD_DEVICES=%q\n' "$amd_devices"
+    # Hides AMD GPUs from the HIP runtime; h-run.sh exports it.
+    if [[ -n "$hip_visible_devices" ]]; then
+        printf 'HIP_VISIBLE_DEVICES=%q\n' "$hip_visible_devices"
+    fi
     printf 'TARI_LOG_DIR=%q\n' "$(dirname "$CUSTOM_LOG_BASENAME")/workers"
     printf 'TARI_EXTRA_ARGS=('
     for arg in "${extra_args[@]}"; do

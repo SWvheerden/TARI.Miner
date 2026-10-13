@@ -1,7 +1,7 @@
 # TARI.Miner
 
-TARI.Miner is an open-source NVIDIA CUDA miner for Tari (XTM) Cuckaroo29.
-It connects to LuckyPool and has no developer fee, payout address, donation
+TARI.Miner is an open-source NVIDIA CUDA miner for Tari (XTM) Cuckaroo29, with
+experimental AMD support on Linux and HiveOS. It connects to LuckyPool and has no developer fee, payout address, donation
 schedule, or alternate mining connection.
 
 ## Download
@@ -29,6 +29,42 @@ overrides the automatic platform cap; allocation still stops safely if VRAM
 runs out.
 
 The starter does not change GPU clocks, voltage, fans, or power limits.
+
+## AMD GPUs (experimental)
+
+AMD support is **experimental and not yet tested on hardware**. It is built
+from the same trimmer sources with HIP, compiles in CI, and passes every host
+test, but nobody has run it on an AMD GPU yet. Use it to help test, not to
+mine unattended.
+
+- Linux and HiveOS only; the Windows package has no AMD backend.
+- Supported GPUs, all in one binary (`bin/tari_c29_pool_miner_amd`):
+  - RDNA2: RX 6800, 6800 XT, 6900 XT, 6950 XT (gfx1030), RX 6700, 6700 XT,
+    6750 XT (gfx1031), RX 6600, 6600 XT, 6650 XT (gfx1032)
+  - RDNA3: RX 7900 XTX, 7900 XT, 7900 GRE (gfx1100), RX 7800 XT, 7700 XT
+    (gfx1101), RX 7600, 7600 XT (gfx1102)
+  - RDNA4: RX 9070, 9070 XT (gfx1201), RX 9060 XT (gfx1200)
+- Older AMD GPUs (Vega, Polaris) are not supported: the kernels need 32-lane
+  wavefronts.
+- Each solver context needs about 6 GB of VRAM.
+- The ROCm HIP runtime must be installed. The binaries link against
+  `libamdhip64.so.7` and are built with ROCm 7.2.4, so install ROCm 7.2 or
+  newer. `ldd bin/tari_c29_pool_miner_amd` shows whether the library is found.
+
+The Linux and HiveOS starters run `bin/tari_c29_pool_miner_amd --list-devices`
+to find AMD GPUs and start one worker per GPU, named like `RIG01-amd0`, next to
+the NVIDIA workers on a mixed rig. `TARI_AMD_DEVICES=0,2` selects AMD GPUs by
+the index `--list-devices` prints; `TARI_DEVICES` keeps selecting NVIDIA GPUs.
+A rig with only AMD GPUs does not need `nvidia-smi`. GPUs the backend has no
+code for, such as the integrated graphics of a Ryzen CPU or an RX 6400/6500
+(gfx1034), are skipped with a warning. If the HIP runtime itself has trouble
+with such a GPU, hide it with `HIP_VISIBLE_DEVICES`, for example
+`HIP_VISIBLE_DEVICES=0`; the remaining GPUs are then renumbered from 0.
+
+Please report results, good or bad, as a GitHub issue: the GPU model, the
+ROCm version, the `--list-devices` output, the first lines of the miner log,
+and its speed reports. `docs/amd-validation.md` describes the full check,
+including the exact recall test against the reference build.
 
 ## Windows
 
@@ -120,7 +156,9 @@ TARI_LOGIN_SEPARATOR=. \
 ```
 
 Use `TARI_DEVICES=0,2` to select specific GPUs. Press Ctrl+C to stop all GPU
-workers started by the script.
+workers started by the script. AMD GPUs (experimental, see above) are selected
+with `TARI_AMD_DEVICES` and log to `amd0.log`, `amd1.log`, and so on when
+`TARI_LOG_DIR` is set.
 
 ## HiveOS
 
@@ -136,7 +174,9 @@ Pass: x
 ```
 
 The HiveOS launcher uses every supported GPU unless Extra config arguments
-contains a selector such as `TARI_DEVICES=0,2`. Other extra arguments are
+contains a selector such as `TARI_DEVICES=0,2` (NVIDIA) or
+`TARI_AMD_DEVICES=0` (AMD, experimental). For AMD GPUs, temperatures and fans
+come from the HiveOS agent's own GPU stats. Other extra arguments are
 passed to each miner process, for example `--pipeline 1`. Per-GPU graph rates,
 temperatures, fans, and share counters are reported to the HiveOS agent.
 
@@ -155,6 +195,7 @@ Options placed after the starter command are passed to every selected GPU:
 --ntrims N              Even trim-round count; defaults to the build's (50 on sm_89)
 --max-runtime-sec N     Stop after N seconds
 --no-stale-skip         Also search and submit work for a superseded block
+--list-devices          Print index, name, architecture and PCI bus of each GPU, then exit
 --version               Print version and exit
 ```
 
@@ -254,8 +295,9 @@ The starters propagate these. When a GPU worker exits non-zero, the starter
 stops the remaining workers and exits with that same code, rather than carrying
 on with its healthy GPUs — otherwise HiveOS never sees the failure. A starter
 that fails before any worker runs uses its own codes: 2 for a missing wallet, 3
-when `nvidia-smi` finds no GPU, 4 when `TARI_DEVICES` matches none, 5 for a
-missing backend binary, and 130 for Ctrl+C.
+when neither `nvidia-smi` nor the AMD backend finds a GPU, 4 when
+`TARI_DEVICES` and `TARI_AMD_DEVICES` match none, 5 for a missing backend
+binary, and 130 for Ctrl+C.
 
 ## Test The Solver
 
@@ -320,6 +362,23 @@ three target architectures:
 ```bash
 ./build_all.sh
 ```
+
+The experimental AMD backends need ROCm with `hipcc` (7.2 or newer, for the
+RDNA4 targets). Build them alone, or with the NVIDIA ones through `build_all.sh`:
+
+```bash
+./build_solver.sh amd
+./build_pool_miner.sh amd
+TARI_BUILD_AMD=1 ./build_all.sh
+```
+
+The `amd` arch compiles one binary for gfx1030, gfx1031, gfx1032, gfx1100,
+gfx1101, gfx1102, gfx1200 and gfx1201. Set `AMD_OFFLOAD_ARCHES` to a
+space-separated list to change that, and `HIPCC` to use another `hipcc`. Its
+release flags are in `build_flags/amd.flags`. AMD workgroups have 64 KB of
+shared memory, so the HIP build rejects `LATE_ROUND_BPB=8` and
+`ROUND0_DST_HASH_DYNAMIC_BITS` above 12 at compile time, and it does not
+support `TRIM_CUDA_GRAPH`.
 
 `build_all` also compiles the non-release reference solvers used by the recall
 test. Individual backends can be built with `build_solver` or

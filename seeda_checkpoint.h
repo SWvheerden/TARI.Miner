@@ -20,7 +20,7 @@
 
 #include <stdint.h>
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__) // nvcc or hipcc
 #define SEEDA_HD __device__ __forceinline__
 #define SEEDA_PRAGMA(x) _Pragma(#x)
 #else

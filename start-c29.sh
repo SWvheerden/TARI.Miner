@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARI_POOL="${TARI_POOL:-taric29-ca.luckypool.io:3111}"
 TARI_WORKER="${TARI_WORKER:-$(hostname)}"
 TARI_DEVICES="${TARI_DEVICES:-all}"
+TARI_AMD_DEVICES="${TARI_AMD_DEVICES:-all}"
 TARI_NVIDIA_SMI="${TARI_NVIDIA_SMI:-nvidia-smi}"
+TARI_AMD_MINER="${TARI_AMD_MINER:-$ROOT/bin/tari_c29_pool_miner_amd}"
 TARI_LOG_DIR="${TARI_LOG_DIR:-}"
 TARI_LOGIN_SEPARATOR="${TARI_LOGIN_SEPARATOR:-}"
 MINER_ARGS=("$@")
@@ -38,6 +40,23 @@ device_selected() {
     [[ "${TARI_DEVICES,,}" == "all" || "$requested" == *",$index,"* ]]
 }
 
+# gfx targets the AMD backend is built for. Keep this list the same as the
+# default AMD_OFFLOAD_ARCHES in build_solver.sh and build_pool_miner.sh
+# (tests/start_c29_launcher_test.sh checks it).
+AMD_SUPPORTED_ARCHES="gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201"
+
+amd_arch_supported() {
+    [[ " $AMD_SUPPORTED_ARCHES " == *" $1 "* ]]
+}
+
+# TARI_AMD_DEVICES selects AMD GPUs by their HIP index, as TARI_DEVICES
+# selects NVIDIA GPUs by their nvidia-smi index.
+amd_device_selected() {
+    local index="$1"
+    local requested=",${TARI_AMD_DEVICES//[[:space:]]/},"
+    [[ "${TARI_AMD_DEVICES,,}" == "all" || "$requested" == *",$index,"* ]]
+}
+
 backend_arch() {
     case "$1" in
         8.6) printf 'sm_86' ;;
@@ -47,16 +66,68 @@ backend_arch() {
     esac
 }
 
+# AMD GPUs come from the AMD backend itself: it prints one
+# "index<TAB>name<TAB>arch<TAB>bus" line per GPU the HIP runtime sees (older
+# builds print no bus field). Without the
+# backend, or when it cannot run (no ROCm runtime), the rig has no AMD GPUs.
+amd_output=""
+amd_detected=0
+if [[ -x "$TARI_AMD_MINER" ]]; then
+    if amd_output="$("$TARI_AMD_MINER" --list-devices 2>/dev/null)"; then
+        while IFS=$'\t' read -r raw_index raw_name raw_arch raw_bus; do
+            if [[ "$raw_index" =~ ^[0-9]+$ ]]; then
+                amd_detected=$((amd_detected + 1))
+            fi
+        done <<< "$amd_output"
+    else
+        amd_output=""
+    fi
+fi
+
+# A rig with only AMD GPUs may have no nvidia-smi, or one that cannot reach a
+# driver. Skip NVIDIA there; with no AMD GPU either, that is still an error.
 if ! gpu_output="$("$TARI_NVIDIA_SMI" --query-gpu=index,compute_cap,name --format=csv,noheader,nounits 2>&1)"; then
-    echo "ERROR: nvidia-smi could not enumerate NVIDIA GPUs." >&2
-    echo "$gpu_output" >&2
-    exit 3
+    if ((amd_detected == 0)); then
+        echo "ERROR: nvidia-smi could not enumerate NVIDIA GPUs." >&2
+        echo "$gpu_output" >&2
+        exit 3
+    fi
+    echo "NOTICE: nvidia-smi could not enumerate NVIDIA GPUs; starting AMD GPUs only."
+    gpu_output=""
 fi
 
 detected=0
 launched=0
 missing=0
 pids=()
+
+# start_worker LOG_NAME COMMAND...
+#   Starts one miner worker in the background, or prints it for a dry run.
+#   With TARI_LOG_DIR set, its output also goes to TARI_LOG_DIR/LOG_NAME.log.
+start_worker() {
+    local log_name="$1"
+    shift
+    local command=("$@")
+    if [[ "${TARI_DRY_RUN:-0}" == "1" ]]; then
+        printf '[DRY RUN]'
+        printf ' %q' "${command[@]}"
+        printf '\n'
+    elif [[ -n "$TARI_LOG_DIR" ]]; then
+        mkdir -p "$TARI_LOG_DIR"
+        log_file="$TARI_LOG_DIR/$log_name.log"
+        : > "$log_file"
+        logged_command=("${command[@]}")
+        if command -v stdbuf >/dev/null 2>&1; then
+            logged_command=(stdbuf -oL -eL "${command[@]}")
+        fi
+        "${logged_command[@]}" > >(tee -a "$log_file") 2>&1 &
+        pids+=("$!")
+    else
+        "${command[@]}" &
+        pids+=("$!")
+    fi
+    launched=$((launched + 1))
+}
 
 while IFS=',' read -r raw_index raw_cap raw_name; do
     [[ -z "${raw_index//[[:space:]]/}" ]] && continue
@@ -84,38 +155,60 @@ while IFS=',' read -r raw_index raw_cap raw_name; do
     if [[ -n "$TARI_LOGIN_SEPARATOR" ]]; then
         command+=(--login-separator "$TARI_LOGIN_SEPARATOR")
     fi
-    if [[ "${TARI_DRY_RUN:-0}" == "1" ]]; then
-        printf '[DRY RUN]'
-        printf ' %q' "${command[@]}"
-        printf '\n'
-    elif [[ -n "$TARI_LOG_DIR" ]]; then
-        mkdir -p "$TARI_LOG_DIR"
-        log_file="$TARI_LOG_DIR/gpu$index.log"
-        : > "$log_file"
-        logged_command=("${command[@]}")
-        if command -v stdbuf >/dev/null 2>&1; then
-            logged_command=(stdbuf -oL -eL "${command[@]}")
-        fi
-        "${logged_command[@]}" > >(tee -a "$log_file") 2>&1 &
-        pids+=("$!")
-    else
-        "${command[@]}" &
-        pids+=("$!")
-    fi
-    launched=$((launched + 1))
+    start_worker "gpu$index" "${command[@]}"
 done <<< "$gpu_output"
+nvidia_detected="$detected"
+
+# AMD workers are named -amd<index> and log to amd<index>.log, so they never
+# collide with the NVIDIA -gpu<index> workers.
+while IFS=$'\t' read -r raw_index raw_name raw_arch raw_bus; do
+    [[ "$raw_index" =~ ^[0-9]+$ ]] || continue
+    detected=$((detected + 1))
+    index="$raw_index"
+    name="$(trim "$raw_name")"
+    arch="$(trim "$raw_arch")"
+    arch="${arch%%:*}" # drop feature flags such as gfx1030:xnack-
+
+    amd_device_selected "$index" || continue
+    # An integrated GPU or another target the backend has no code for would
+    # fail its worker, and that stops every other worker too.
+    if ! amd_arch_supported "$arch"; then
+        echo "WARNING: Skipping AMD GPU $index [$name]: $arch is not supported." >&2
+        continue
+    fi
+
+    amd_worker="$TARI_WORKER-amd$index"
+    echo "AMD GPU $index [$name] $arch -> amd, worker $amd_worker"
+    command=("$TARI_AMD_MINER" "${MINER_ARGS[@]}" --device "$index" --pool "$TARI_POOL" --wallet "$TARI_WALLET" --worker "$amd_worker")
+    if [[ -n "$TARI_LOGIN_SEPARATOR" ]]; then
+        command+=(--login-separator "$TARI_LOGIN_SEPARATOR")
+    fi
+    start_worker "amd$index" "${command[@]}"
+done <<< "$amd_output"
 
 if ((detected == 0)); then
-    echo "ERROR: No NVIDIA GPUs were detected." >&2
+    if [[ -x "$TARI_AMD_MINER" ]]; then
+        echo "ERROR: No NVIDIA or AMD GPUs were detected." >&2
+    else
+        echo "ERROR: No NVIDIA GPUs were detected." >&2
+    fi
     exit 3
 fi
 
 if ((launched == 0)); then
-    echo "ERROR: No supported GPUs matched TARI_DEVICES=$TARI_DEVICES." >&2
+    if ((amd_detected > 0)); then
+        echo "ERROR: No supported GPUs matched TARI_DEVICES=$TARI_DEVICES or TARI_AMD_DEVICES=$TARI_AMD_DEVICES." >&2
+    else
+        echo "ERROR: No supported GPUs matched TARI_DEVICES=$TARI_DEVICES." >&2
+    fi
     exit 4
 fi
 
-echo "Started $launched miner worker(s) from $detected detected NVIDIA GPU(s)."
+if ((amd_detected > 0)); then
+    echo "Started $launched miner worker(s) from $nvidia_detected detected NVIDIA GPU(s) and $amd_detected detected AMD GPU(s)."
+else
+    echo "Started $launched miner worker(s) from $detected detected NVIDIA GPU(s)."
+fi
 if [[ "${TARI_DRY_RUN:-0}" == "1" ]]; then
     ((missing == 0)) || exit 5
     exit 0
