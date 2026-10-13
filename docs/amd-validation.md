@@ -94,12 +94,13 @@ too: keep the directory and report it.
 
 ### Gate 4b: AMD proofs against NVIDIA proofs
 
-The maintainer supplies the NVIDIA proofs: the `reference-p1-a.jsonl` file
-from the same `tests/tari_c29_gpu_recall.py run` command run on an NVIDIA card
-(for example `--arch sm_89`) with the same defaults: default mining hash,
+The NVIDIA proofs are in the repository:
+`tests/fixtures/nvidia_sm89_recall_reference.jsonl`. It is the
+`reference-p1-a.jsonl` file from the same `tests/tari_c29_gpu_recall.py run`
+command run on an NVIDIA GeForce RTX 4080 (`--arch sm_89`, driver 617.14,
+CUDA 13.4, Windows 11) with the same defaults: default mining hash,
 `--nonce 0`, `--count 4200`, and 50 trim rounds (the reference build always
-uses 50). Save it as `validation/nvidia-reference.jsonl`. Without that file
-this gate has not been run: report it as NOT RUN, not as passed.
+uses 50). It holds 110 proofs, and the recall gate it came from passed.
 
 Compare both AMD 50-round runs from gate 4a with it. `compare-proofs`
 checks that the files cover the same graphs (mining hash, start nonce, count)
@@ -111,13 +112,13 @@ edges). The GPU architectures may differ. It needs nothing beyond Python 3:
 run_dir="$(ls -d validation/recall-* | tail -n 1)"
 for label in candidate-p1-a reference-p1-a; do
   python3 tests/tari_c29_gpu_recall.py compare-proofs \
-    --reference validation/nvidia-reference.jsonl \
+    --reference tests/fixtures/nvidia_sm89_recall_reference.jsonl \
     --candidate "$run_dir/$label.jsonl"
   echo "gate 4b $label: exit $?"
 done
 ```
 
-Pass: both commands print `PASS: N identical proofs ...` and exit 0. Any
+Pass: both commands print `PASS: 110 identical proofs ...` and exit 0. Any
 `FAIL:` line (it names the setting that differs, or how many proofs are only
 on one side with samples) or a non-zero exit is a FAIL: report the output.
 
@@ -227,9 +228,9 @@ It should print `AMD GPU 0 [...] gfx... -> amd, worker <host>-amd0` and a
 1. GPU model, gfx name, VRAM; `--list-devices` output; ROCm version,
    `hipcc --version`, kernel and distribution; CPU model and core count.
 2. Step 3: the full solver output.
-3. Step 4: gate 4a PASS or FAIL with `report.json`; gate 4b PASS, FAIL or
-   NOT RUN with the full `compare-proofs` output;
-   and `candidate-p1-a.jsonl` and `reference-p1-a.jsonl`.
+3. Step 4: gate 4a PASS or FAIL with `report.json`; gate 4b PASS or
+   FAIL with the full `compare-proofs` output; and
+   `candidate-p1-a.jsonl` and `reference-p1-a.jsonl`.
 4. Step 5: the pipeline depth, the three graphs/s values, and `stage-ms.txt`.
 5. Step 6: the miner's exit code, the first 20 lines and the last speed report
    of `miner.log`, and the submit count from `stub.log`.
