@@ -20,6 +20,12 @@ unaltered upstream license is included at `third_party/cuckoo/LICENSE.txt`.
 
 Upstream project: https://github.com/tromp/cuckoo
 
+`third_party/cuckoo/src/crypto/siphash.cuh` is modified (marked
+`[tari-c29 portability patch]`) so that the HIP (AMD)
+build never uses its NVIDIA PTX inline assembly (64-bit add with carry,
+`shf.l.wrap` rotates, `mov.b64`) and takes the plain C++ 64-bit add,
+shift/or rotate path instead, which computes the same bits.
+
 ## BLAKE2
 
 The BLAKE2 reference files under `third_party/cuckoo/src/crypto` retain their

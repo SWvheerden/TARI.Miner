@@ -11,6 +11,8 @@ fi
 
 TARI_DEVICES="${TARI_DEVICES:-all}"
 TARI_LOG_DIR="${TARI_LOG_DIR:-$(dirname "$CUSTOM_LOG_BASENAME")/workers}"
+# HiveOS writes per-GPU temperatures and fans here; AMD stats come from it.
+GPU_STATS_JSON="${GPU_STATS_JSON:-/run/hive/gpu-stats.json}"
 
 device_selected() {
     local index="$1"
@@ -37,25 +39,10 @@ json_number_array() {
     printf '%s]' "$out"
 }
 
-rates=()
-temps=()
-fans=()
-buses=()
-accepted=0
-rejected=0
-now="$(date +%s)"
-
-while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
-    index="$(xargs <<< "${raw_index:-}")"
-    cap="$(xargs <<< "${raw_cap:-}")"
-    bus="$(xargs <<< "${raw_bus:-}")"
-    temp="$(xargs <<< "${raw_temp:-0}")"
-    fan="$(xargs <<< "${raw_fan:-0}")"
-    [[ -n "$index" ]] || continue
-    device_selected "$index" || continue
-    supported_cap "$cap" || continue
-
-    log_file="$TARI_LOG_DIR/gpu$index.log"
+# read_log_stats LOG_FILE
+#   Sets rate, gpu_accepted and gpu_rejected from one worker log.
+read_log_stats() {
+    local log_file="$1" log_window log_size log_start log_skip
     rate=0
     gpu_accepted=0
     gpu_rejected=0
@@ -101,6 +88,31 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
             }
         ')
     fi
+}
+
+rates=()
+temps=()
+fans=()
+buses=()
+accepted=0
+rejected=0
+now="$(date +%s)"
+
+# On a rig without NVIDIA GPUs nvidia-smi may be missing, or print an error to
+# stdout and fail; then there is nothing to read.
+nvidia_output="$(nvidia-smi --query-gpu=index,compute_cap,pci.bus_id,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null)" || nvidia_output=""
+while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
+    index="$(xargs <<< "${raw_index:-}")"
+    cap="$(xargs <<< "${raw_cap:-}")"
+    bus="$(xargs <<< "${raw_bus:-}")"
+    temp="$(xargs <<< "${raw_temp:-0}")"
+    fan="$(xargs <<< "${raw_fan:-0}")"
+    [[ -n "$index" ]] || continue
+    device_selected "$index" || continue
+    supported_cap "$cap" || continue
+
+    log_file="$TARI_LOG_DIR/gpu$index.log"
+    read_log_stats "$log_file"
 
     bus="${bus#*:}"
     bus="${bus%%:*}"
@@ -120,7 +132,54 @@ while IFS=',' read -r raw_index raw_cap raw_bus raw_temp raw_fan; do
     buses+=("$bus")
     accepted=$((accepted + gpu_accepted))
     rejected=$((rejected + gpu_rejected))
-done < <(nvidia-smi --query-gpu=index,compute_cap,pci.bus_id,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null || true)
+done <<< "$nvidia_output"
+
+# AMD workers. start-c29.sh writes amd<index>.log for each AMD GPU it starts
+# (h-run.sh clears old logs first), so the logs name the AMD GPUs in use.
+# Temperature, fan and bus come from the HiveOS GPU stats: the AMD entries
+# there, in bus order, are taken to be HIP devices 0, 1, 2, ... (the HIP
+# runtime also lists GPUs in bus order). Without the stats file, or without
+# jq, they are reported as 0.
+amd_hw=()
+if [[ -f "$GPU_STATS_JSON" ]] && command -v jq >/dev/null 2>&1; then
+    while read -r line; do
+        amd_hw+=("$line")
+    done < <(jq -r 'if (.brand | type) == "array" then
+            range(0; .brand | length) as $i
+            | select(.brand[$i] == "amd")
+            | "\(.temp[$i] // 0) \(.fan[$i] // 0) \(.busids[$i] // 0)"
+        else empty end' "$GPU_STATS_JSON" 2>/dev/null || true)
+fi
+amd_indexes="$(ls "$TARI_LOG_DIR" 2>/dev/null | sed -n -E 's/^amd(0|[1-9][0-9]*)\.log$/\1/p' | sort -n)"
+while read -r index; do
+    [[ -n "$index" ]] || continue
+    read_log_stats "$TARI_LOG_DIR/amd$index.log"
+
+    temp=0
+    fan=0
+    bus=0
+    if ((index < ${#amd_hw[@]})); then
+        read -r temp fan bus <<< "${amd_hw[$index]}"
+    fi
+    # HiveOS bus ids look like 03:00.0, sometimes with a 0000: domain.
+    bus="${bus%:*}"
+    bus="${bus##*:}"
+    case "$bus" in
+        ''|*[!0-9A-Fa-f]*) bus=0 ;;
+        *) bus=$((16#$bus)) ;;
+    esac
+    temp="${temp%%.*}"
+    fan="${fan%%.*}"
+    case "$temp" in ''|*[!0-9]*) temp=0 ;; esac
+    case "$fan" in ''|*[!0-9]*) fan=0 ;; esac
+
+    rates+=("$rate")
+    temps+=("$temp")
+    fans+=("$fan")
+    buses+=("$bus")
+    accepted=$((accepted + gpu_accepted))
+    rejected=$((rejected + gpu_rejected))
+done <<< "$amd_indexes"
 
 if [[ ${#rates[@]} -eq 0 ]]; then
     rates=(0)
@@ -131,7 +190,7 @@ fi
 
 khs="$(awk 'BEGIN { total=0; for (i=1; i<ARGC; i++) total+=ARGV[i]; printf "%.6f", total/1000 }' "${rates[@]}")"
 uptime=0
-pid="$(pgrep -fo 'tari_c29_pool_miner_sm_' 2>/dev/null || true)"
+pid="$(pgrep -fo 'tari_c29_pool_miner_(sm_|amd)' 2>/dev/null || true)"
 if [[ -n "$pid" ]]; then
     uptime="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)"
 fi

@@ -53,7 +53,9 @@ PACKED_BYTES = (PROOF_SIZE * EDGE_BITS + 7) // 8
 MAX_U64 = (1 << 64) - 1
 MAX_U256 = (1 << 256) - 1
 DEFAULT_MINING_HASH = "".join("{:02x}".format(i) for i in range(32))
-SUPPORTED_ARCHES = ("sm_86", "sm_89", "sm_120")
+# "amd" is the HIP build: one binary for every supported gfx target, which
+# also reports its device as "amd".
+SUPPORTED_ARCHES = ("sm_86", "sm_89", "sm_120", "amd")
 REFERENCE_NTRIMS = 50
 BUILD_FLAGS_DIR = Path(__file__).resolve().parent.parent / "build_flags"
 ARCH_FLAGS_ENV = "TARI_ARCH_FLAGS"
@@ -975,6 +977,10 @@ def self_test() -> int:
         "sm_86 release ntrims",
     )
     check(
+        release_compiled_ntrims("amd", environ=no_env) == 50,
+        "amd release ntrims",
+    )
+    check(
         release_compiled_ntrims("sm_75", environ=no_env) == 50,
         "arch without a flags file uses the default",
     )
@@ -1095,6 +1101,22 @@ def self_test() -> int:
         expect_recall_error(
             lambda: load_recall(wrong_release_default),
             "expected 48",
+        )
+
+        amd = root / "amd.jsonl"
+        _write_fixture(
+            amd,
+            edges,
+            ntrims=50,
+            compiled_ntrims=50,
+            arch="amd",
+            device_arch="amd",
+        )
+        amd_dataset = load_recall(amd)
+        check(amd_dataset.metadata["arch"] == "amd", "amd build metadata")
+        expect_recall_error(
+            lambda: compare_recall(dataset, amd_dataset, "NVIDIA/AMD"),
+            "arch",
         )
 
         reference = root / "reference.jsonl"

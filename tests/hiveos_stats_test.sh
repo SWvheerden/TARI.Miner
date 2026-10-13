@@ -161,6 +161,58 @@ check "forged only" '"hs":[0.000]' '"ar":[0,0]' <<EOF
 pool error: {"id":999,"error":"speed 50 g/s accepted=7 rejected=0"}
 EOF
 
+# AMD workers log to amd<index>.log. Their temperature, fan and bus come
+# from the HiveOS GPU stats file, whose AMD entries are HIP devices 0, 1, ...
+# check_stats NAME PATH_PREFIX LOG_DIR GPU_STATS_JSON EXPECTED...
+check_stats() {
+    local name="$1" path_prefix="$2" log_dir="$3" gpu_stats="$4"
+    shift 4
+    local stats
+    stats="$(
+        PATH="$path_prefix:$TEMP_ROOT/bin:$PATH" \
+        CUSTOM_CONFIG_FILENAME="$TEMP_ROOT/miner.env" \
+        TARI_LOG_DIR="$log_dir" \
+        TARI_DEVICES=all \
+        GPU_STATS_JSON="$gpu_stats" \
+            bash "$ROOT/hiveos/h-stats.sh"
+    )"
+    local expected
+    for expected in "$@"; do
+        if [[ "$stats" != *"$expected"* ]]; then
+            echo "FAIL $name: expected $expected in $stats" >&2
+            fail=1
+        fi
+    done
+}
+
+amd_root="$TEMP_ROOT/amd"
+mkdir -p "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/mixed-logs"
+# HiveOS AMD rigs have an nvidia-smi that cannot reach a driver.
+cat > "$amd_root/bin/nvidia-smi" <<'EOF'
+#!/usr/bin/env bash
+echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."
+exit 9
+EOF
+chmod +x "$amd_root/bin/nvidia-smi"
+# A CPU entry comes first, then the two AMD GPUs; values as strings, as HiveOS
+# writes them.
+cat > "$amd_root/gpu-stats.json" <<'EOF'
+{"busids":["00:00.0","03:00.0","0000:04:00.0"],"brand":["cpu","amd","amd"],"temp":["0","55","57"],"fan":["0","30","35"]}
+EOF
+amd_slow="${fixture/13.65 g\/s/9.00 g\/s}"
+printf '%s\n' "$fixture" > "$amd_root/amd-only-logs/amd0.log"
+printf '%s\n' "$amd_slow" > "$amd_root/amd-only-logs/amd1.log"
+check_stats "AMD-only rig" "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/gpu-stats.json" \
+    '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[55,57]' '"fan":[30,35]' '"bus_numbers":[3,4]'
+check_stats "AMD-only rig without GPU stats" "$amd_root/bin" "$amd_root/amd-only-logs" "$amd_root/missing.json" \
+    '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[0,0]' '"fan":[0,0]' '"bus_numbers":[0,0]'
+
+# Mixed rig: NVIDIA GPU 0 from nvidia-smi and gpu0.log, then AMD GPU 0.
+printf '%s\n' "$fixture" > "$amd_root/mixed-logs/gpu0.log"
+printf '%s\n' "$amd_slow" > "$amd_root/mixed-logs/amd0.log"
+check_stats "mixed rig" "$TEMP_ROOT/bin" "$amd_root/mixed-logs" "$amd_root/gpu-stats.json" \
+    '"hs":[13.650,9.000]' '"ar":[4,2]' '"temp":[61,55]' '"fan":[45,30]' '"bus_numbers":[1,3]'
+
 # h-stats.sh relies on pool text never starting a log line. The miner
 # prints pool text only at these call sites, each after a fixed prefix. A new
 # sanitize_for_terminal call must be checked the same way and added here.

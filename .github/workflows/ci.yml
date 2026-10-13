@@ -28,9 +28,43 @@ jobs:
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v4
+        with:
+          # The SASS check below builds the pull request's base commit too.
+          fetch-depth: 0
 
       - name: Build solver and pool miner for all shipped architectures
         run: ./build_all.sh
+
+      # The HIP port must not change the NVIDIA kernels. Build the sm_89 pool
+      # miner at the pull request's base and compare its SASS with the one
+      # just built. cuobjdump prints no file names; the instruction offsets
+      # are dropped so only the instructions and their encodings are compared.
+      # Runs before the option matrix, which rebuilds the same binary.
+      - name: Check the sm_89 SASS matches the base commit
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          base="$(git merge-base "$BASE_SHA" HEAD)"
+          echo "Comparing against $base"
+          git worktree add --detach /tmp/sass-base "$base"
+          (cd /tmp/sass-base && ./build_pool_miner.sh sm_89)
+          dump_sass() {
+            cuobjdump -sass "$1" | sed -E 's@/\*[0-9a-f]{4,}\*/@@'
+          }
+          dump_sass /tmp/sass-base/bin/tari_c29_pool_miner_sm_89 > /tmp/sass-base.txt
+          dump_sass bin/tari_c29_pool_miner_sm_89 > /tmp/sass-head.txt
+          echo "base: $(grep -c 'Function :' /tmp/sass-base.txt) kernels, $(wc -l < /tmp/sass-base.txt) lines"
+          echo "head: $(grep -c 'Function :' /tmp/sass-head.txt) kernels, $(wc -l < /tmp/sass-head.txt) lines"
+          if ! diff -u /tmp/sass-base.txt /tmp/sass-head.txt > /tmp/sass.diff; then
+            head -200 /tmp/sass.diff
+            echo "::error::sm_89 SASS differs from the base commit $base"
+            exit 1
+          fi
+          echo "sm_89 SASS is identical to the base commit $base" >> "$GITHUB_STEP_SUMMARY"
 
       # Experimental trim options are off by default. Compile each one, and
       # the combinations that interact, so they keep building until the GPU
@@ -66,6 +100,123 @@ jobs:
           echo "::group::pool miner sm_89: checkpointed SeedA"
           TARI_ARCH_FLAGS="-DSEEDA_CHECKPOINT=16" ./build_pool_miner.sh sm_89
           echo "::endgroup::"
+
+  hip-build:
+    name: Linux HIP build
+    runs-on: ubuntu-latest
+    # ROCm 7.2 supports every AMD target the build ships, including the RDNA4
+    # gfx1200 and gfx1201.
+    container:
+      image: rocm/dev-ubuntu-22.04:7.2.4
+    defaults:
+      run:
+        shell: bash
+    env:
+      HIPCC: /opt/rocm/bin/hipcc
+    steps:
+      - name: Install checkout prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - name: Show the HIP toolchain
+        run: |
+          "$HIPCC" --version
+
+      - name: Build solver and pool miner for amd
+        run: |
+          set -euo pipefail
+          ./build_solver.sh amd
+          ./build_pool_miner.sh amd
+          ./build_solver.sh amd reference
+
+      # The runner has no AMD GPU: the binaries must start, answer --help and
+      # --version, and report that there is no device instead of crashing.
+      - name: Run the AMD binaries without a GPU
+        run: |
+          set -uo pipefail
+          miner=bin/tari_c29_pool_miner_amd
+          solver=bin/tari_c29_solver_amd
+          ldd "$miner" | grep -E 'amdhip64' || { echo "::error::$miner does not link libamdhip64"; exit 1; }
+          "$miner" --version || exit 1
+          "$miner" --help > /tmp/help.out || exit 1
+          grep -qF -- '--list-devices' /tmp/help.out || { echo "::error::--help does not list --list-devices"; exit 1; }
+          "$solver" --version || exit 1
+          "$solver" --help > /dev/null || exit 1
+
+          "$miner" --list-devices > /tmp/list.out 2> /tmp/list.err
+          status=$?
+          echo "--list-devices exit $status"; cat /tmp/list.out /tmp/list.err
+          if ((status != 0)); then
+            echo "::error::--list-devices exited $status without a GPU; expected 0"
+            exit 1
+          fi
+          if [[ -s /tmp/list.out ]]; then
+            echo "::error::--list-devices listed devices on a runner without a GPU"
+            exit 1
+          fi
+          grep -qF "no HIP GPU devices found" /tmp/list.err || { echo "::error::--list-devices gave no clear no-device message"; exit 1; }
+
+          "$solver" --count 1 > /tmp/solver.out 2> /tmp/solver.err
+          status=$?
+          echo "solver exit $status"; cat /tmp/solver.out /tmp/solver.err
+          if ((status != 1)); then
+            echo "::error::the solver exited $status without a GPU; expected 1"
+            exit 1
+          fi
+          grep -qF "no HIP device 0" /tmp/solver.err || { echo "::error::the solver gave no clear no-device message"; exit 1; }
+
+      # Options that change shared memory use or the warp code. One gfx target
+      # per RDNA generation keeps this quick.
+      - name: Build the AMD option matrix
+        env:
+          AMD_OFFLOAD_ARCHES: gfx1030 gfx1100 gfx1201
+        run: |
+          set -euo pipefail
+          flag_sets=(
+            "-DSEEDA_CHECKPOINT=16"
+            "-DLATE_ROUND_BPB=4"
+            "-DLATE_ROUND_BPB=2 -DLATE_ROUND_SELF_ZERO_IDX=1 -DROUND_LATE_TPB=512"
+            "-DROUND0_DST_HASH_DYNAMIC_BITS=12 -DROUND0_DST_HASH_FALLBACK_PLAIN=0"
+            "-DWARP_DST_ATOMICS_LATE=1 -DFUSE_FINAL_TAIL_CURRENT=1 -DSKIP_LATE_NULL_CHECKS=0"
+            "-DROUND_U64_EDGE_LOAD=1 -DTRIM_STAGE_TIMING=1"
+          )
+          for flags in "${flag_sets[@]}"; do
+            echo "::group::solver amd: $flags"
+            TARI_ARCH_FLAGS="$flags" ./build_solver.sh amd
+            echo "::endgroup::"
+          done
+          echo "::group::pool miner amd: checkpointed SeedA"
+          TARI_ARCH_FLAGS="-DSEEDA_CHECKPOINT=16" ./build_pool_miner.sh amd
+          echo "::endgroup::"
+
+      # Options the HIP build cannot run must stop the build with a clear
+      # message rather than fail at launch.
+      - name: Check unsupported options are rejected at compile time
+        env:
+          AMD_OFFLOAD_ARCHES: gfx1100
+        run: |
+          set -uo pipefail
+          expect_rejected() {
+            local flags="$1" message="$2"
+            if TARI_ARCH_FLAGS="$flags" ./build_solver.sh amd > /tmp/rejected.log 2>&1; then
+              echo "::error::$flags built, but the HIP build must reject it"
+              exit 1
+            fi
+            if ! grep -qF -- "$message" /tmp/rejected.log; then
+              cat /tmp/rejected.log
+              echo "::error::$flags failed without the expected message: $message"
+              exit 1
+            fi
+            echo "$flags rejected: $message"
+          }
+          expect_rejected "-DLATE_ROUND_BPB=8" "LATE_ROUND_BPB needs more than the 64 KB"
+          expect_rejected "-DROUND0_DST_HASH_DYNAMIC_BITS=13" "ROUND0_DST_HASH_DYNAMIC_BITS needs more than the 64 KB"
+          expect_rejected "-DTRIM_CUDA_GRAPH=1" "TRIM_CUDA_GRAPH is not supported by the HIP (AMD) build"
 
   linux:
     name: Linux CPU and script checks

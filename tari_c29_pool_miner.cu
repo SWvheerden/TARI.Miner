@@ -657,6 +657,7 @@ static void usage() {
            "  --pipeline N            solver contexts to overlap GPU trim and CPU cycle search, default auto\n"
            "  --max-runtime-sec N     stop after N seconds (test helper)\n"
            "  --no-stale-skip         also search and submit work for a superseded block\n"
+           "  --list-devices          print index, name and arch of each GPU, then exit\n"
            "  --version               print version and exit\n"
            "tuning:\n"
            "  --ntrims N              even trim-round count, build default\n"
@@ -667,6 +668,36 @@ static void usage() {
            "  --tail-tpb N            tail threads/block, default 1024\n"
            "  --recover-blocks N      recovery blocks, default 1024 bounded by graph size\n"
            "  --recover-tpb N         recovery threads/block, default 1024\n");
+}
+
+// --list-devices: one line per GPU the runtime sees, "index<TAB>name<TAB>arch",
+// where arch is sm_XY on NVIDIA and the gfx name on AMD. start-c29.sh uses it
+// to find AMD GPUs. No GPU is not an error here: the list is just empty.
+static int list_devices() {
+    int count = 0;
+    cudaError_t rc = cudaGetDeviceCount(&count);
+    if (rc != cudaSuccess) {
+        fprintf(stderr, "no %s GPU devices found: %s\n", TARI_GPU_RUNTIME, cudaGetErrorString(rc));
+        return 0;
+    }
+    if (count == 0) {
+        fprintf(stderr, "no %s GPU devices found\n", TARI_GPU_RUNTIME);
+        return 0;
+    }
+    for (int i = 0; i < count; i++) {
+        cudaDeviceProp prop;
+        rc = cudaGetDeviceProperties(&prop, i);
+        if (rc != cudaSuccess) {
+            fprintf(stderr, "cannot read %s device %d: %s\n", TARI_GPU_RUNTIME, i, cudaGetErrorString(rc));
+            continue;
+        }
+#if TARI_GPU_HIP
+        printf("%d\t%s\t%s\n", i, prop.name, prop.gcnArchName);
+#else
+        printf("%d\t%s\tsm_%d%d\n", i, prop.name, prop.major, prop.minor);
+#endif
+    }
+    return 0;
 }
 
 static bool parse_args(int argc, char **argv, Options &o) {
@@ -697,6 +728,7 @@ static bool parse_args(int argc, char **argv, Options &o) {
         else if (!strcmp(argv[i], "--recover-blocks")) { char *v = need(argv[i]); if (!v) return false; o.recover_blocks = atoi(v); }
         else if (!strcmp(argv[i], "--recover-tpb")) { char *v = need(argv[i]); if (!v) return false; o.recover_tpb = atoi(v); }
         else if (!strcmp(argv[i], "--version")) { printf("TARI.Miner C29 %s\n", TARI_MINER_VERSION); exit(0); }
+        else if (!strcmp(argv[i], "--list-devices")) { exit(list_devices()); }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); exit(0); }
         else {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
@@ -765,19 +797,24 @@ int main(int argc, char **argv) {
 
     cudaError_t select_rc = cudaSetDevice(opt.device);
     if (select_rc != cudaSuccess) {
-        fprintf(stderr, "no CUDA device %d: %s\n",
-                opt.device, cudaGetErrorString(select_rc));
+        fprintf(stderr, "no %s device %d: %s\n",
+                TARI_GPU_RUNTIME, opt.device, cudaGetErrorString(select_rc));
         socket_cleanup();
         return 1;
     }
     cudaDeviceProp prop;
     if (cudaGetDeviceProperties(&prop, opt.device) != cudaSuccess) {
-        fprintf(stderr, "no CUDA device %d\n", opt.device);
+        fprintf(stderr, "no %s device %d\n", TARI_GPU_RUNTIME, opt.device);
         socket_cleanup();
         return 1;
     }
+#if TARI_GPU_HIP
+    printf("TARI.Miner C29 %s on %s (%.0f GB, %s)\n",
+           TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.gcnArchName);
+#else
     printf("TARI.Miner C29 %s on %s (%.0f GB, sm_%d%d)\n",
            TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.major, prop.minor);
+#endif
     printf("pool=%s worker=%s\n", opt.pool.c_str(), opt.worker.c_str());
 
     SolverParams params;

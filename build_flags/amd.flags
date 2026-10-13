@@ -1,0 +1,14 @@
+# Release-profile hipcc flags for the AMD build (RDNA2/3/4, Linux).
+# One flag per line. Text from '#' to end of line is a comment; blank lines are
+# ignored. Read by build_solver.sh (release profile) and build_pool_miner.sh.
+# TARI_ARCH_FLAGS, when non-empty, replaces this list.
+#
+# Intentionally empty: the AMD build is experimental and untested on hardware,
+# so it uses the kernel defaults (including 50 trim rounds) until a run on a
+# real AMD GPU picks a flag set (docs/amd-validation.md).
+#
+# Shared memory: an AMD workgroup has 64 KB. The defaults fit. Two options can
+# exceed it, and the HIP build rejects them at compile time:
+#   ROUND0_DST_HASH_DYNAMIC_BITS above 12 (12 needs 57,348 bytes)
+#   LATE_ROUND_BPB=8 (65,540 bytes; 2 and 4 fit)
+# TRIM_CUDA_GRAPH is not supported by the HIP build.

@@ -22,7 +22,7 @@ if [[ -z "${TARI_WALLET:-}" ]]; then
 fi
 
 mkdir -p "$TARI_LOG_DIR" "$(dirname "$CUSTOM_LOG_BASENAME")"
-rm -f "$TARI_LOG_DIR"/gpu*.log
+rm -f "$TARI_LOG_DIR"/gpu*.log "$TARI_LOG_DIR"/amd*.log
 
 launcher_args=("${TARI_EXTRA_ARGS[@]}" --pass "$TARI_PASS")
 exec > >(tee -a "$CUSTOM_LOG_BASENAME.log") 2>&1

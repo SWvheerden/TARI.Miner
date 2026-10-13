@@ -1,6 +1,10 @@
 #pragma once
 
-#if (__CUDA_ARCH__  >= 320) // make rotate-left use funnel shifter, 3% speed gain
+// [tari-c29 portability patch] The PTX below (add.cc/addc, shf.l.wrap, mov.b64)
+// is NVIDIA-only. The HIP (AMD) build never takes this branch and uses the
+// plain 64-bit add, shift/or rotate and identity (de)vectorize in the #else
+// branch, which compute the same bits.
+#if (__CUDA_ARCH__  >= 320) && !defined(__HIPCC__) // make rotate-left use funnel shifter, 3% speed gain
 typedef uint2 sip64;
 
 static __device__ __forceinline__ sip64 operator^ (uint2 a, uint2 b) {
@@ -36,7 +40,7 @@ __device__ __forceinline__ uint64_t devectorize(sip64 x) {
   return result;
 }
 
-#else
+#else // host pass, pre-sm_32, and HIP (AMD)
 
 typedef uint64_t sip64;
 

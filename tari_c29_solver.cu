@@ -189,15 +189,20 @@ int main(int argc, char **argv) {
 
     cudaError_t select_rc = cudaSetDevice(device);
     if (select_rc != cudaSuccess) {
-        fprintf(stderr, "no CUDA device %d: %s\n", device, cudaGetErrorString(select_rc));
+        fprintf(stderr, "no %s device %d: %s\n", TARI_GPU_RUNTIME, device, cudaGetErrorString(select_rc));
         return 1;
     }
     cudaDeviceProp prop;
     if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
-        fprintf(stderr, "no CUDA device %d\n", device); return 1;
+        fprintf(stderr, "no %s device %d\n", TARI_GPU_RUNTIME, device); return 1;
     }
+#if TARI_GPU_HIP
+    printf("TARI.Miner C29 solver %s on %s (%.0f GB, %s)\n",
+           TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.gcnArchName);
+#else
     printf("TARI.Miner C29 solver %s on %s (%.0f GB, sm_%d%d)\n",
            TARI_MINER_VERSION, prop.name, prop.totalGlobalMem / 1e9, prop.major, prop.minor);
+#endif
     char mining_hash_hex[65];
     for (int i = 0; i < 32; i++)
         sprintf(mining_hash_hex + 2 * i, "%02x", mining_hash[i]);
@@ -261,8 +266,15 @@ int main(int argc, char **argv) {
             << ",\"pipeline\":" << pipeline
             << ",\"ntrims\":" << (unsigned)params.ntrims
             << ",\"compiled_ntrims\":" << TARI_C29_DEFAULT_NTRIMS
+#if TARI_GPU_HIP
+            // One fat binary covers every supported gfx target, so the AMD
+            // build and device are both reported as "amd".
+            << ",\"arch\":\"amd"
+            << "\",\"device_arch\":\"amd"
+#else
             << ",\"arch\":\"sm_" << TARI_C29_BUILD_ARCH
             << "\",\"device_arch\":\"sm_" << prop.major << prop.minor
+#endif
             << "\",\"profile\":\""
             << (TARI_C29_REFERENCE_BUILD ? "reference" : "release")
             << "\"}\n";

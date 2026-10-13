@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <algorithm>
 #include <type_traits>
+#include "gpu_compat.h"
 #include "cuckaroo.hpp"
 #include "graph.hpp"
 #include "../crypto/siphash.cuh"
@@ -176,6 +177,9 @@ const u32 ROW_EDGES_B = EDGES_B * NY;
 #if TRIM_CUDA_GRAPH && !SQUASH_OUTPUT
 #error "TRIM_CUDA_GRAPH needs SQUASH_OUTPUT: the verbose path syncs the device between rounds"
 #endif
+#if TRIM_CUDA_GRAPH && TARI_GPU_HIP
+#error "TRIM_CUDA_GRAPH is not supported by the HIP (AMD) build"
+#endif
 // Experimental. Source buckets per block in the late rounds; 1 keeps Round,
 // 2, 4 or 8 use RoundMulti with NX2 / LATE_ROUND_BPB blocks.
 #ifndef LATE_ROUND_BPB
@@ -255,7 +259,7 @@ __global__ void SeedA(const siphash_keys sipkeys, ulonglong4 * __restrict__ buff
   const int nthreads = gridDim.x * dim;
   const int FLUSHA2 = 2*FLUSHA;
 
-  __shared__ uint2 tmp[NX][FLUSHA2]; // needs to be ulonglong4 aligned
+  __shared__ TARI_LDS_ALIGN_ULL4 uint2 tmp[NX][FLUSHA2]; // needs to be ulonglong4 aligned
   __shared__ int counters[NX];
   const int TMPPERLL4 = sizeof(ulonglong4) / sizeof(uint2);
 #if !SEEDA_CHECKPOINT && !SEEDA_REHASH
@@ -331,7 +335,7 @@ __global__ void SeedB(const uint2 * __restrict__ source, ulonglong4 * __restrict
   const int lid = threadIdx.x;
   const int FLUSHB2 = 2 * FLUSHB;
 
-  __shared__ uint2 tmp[NX][FLUSHB2];
+  __shared__ TARI_LDS_ALIGN_ULL4 uint2 tmp[NX][FLUSHB2];
   const int TMPPERLL4 = sizeof(ulonglong4) / sizeof(uint2);
   __shared__ int counters[NX];
 
@@ -443,6 +447,10 @@ __device__ __forceinline__ void StoreRoundEdge(uint2 *dst, const int index, cons
 constexpr u32 ROUND0_DST_HASH_EMPTY = 0xffffffffu;
 constexpr int ROUND0_DST_HASH_DYNAMIC_SLOTS = 1 << ROUND0_DST_HASH_DYNAMIC_BITS;
 constexpr int ROUND0_DST_HASH_DYNAMIC_WORDS = ROUND_COUNTER_WORDS + 3 * ROUND0_DST_HASH_DYNAMIC_SLOTS;
+#if TARI_GPU_HIP
+static_assert(ROUND0_DST_HASH_DYNAMIC_WORDS * sizeof(u32) <= TARI_HIP_MAX_LDS_BYTES,
+              "ROUND0_DST_HASH_DYNAMIC_BITS needs more than the 64 KB of shared memory an AMD workgroup has; use 12 or less");
+#endif
 
 __device__ __forceinline__ u32 Round0DstHashBucket(const u32 bucket) {
   u32 h = bucket ^ (bucket >> ROUND0_DST_HASH_DYNAMIC_BITS);
@@ -480,14 +488,14 @@ __device__ __forceinline__ void StoreRoundDirectWarp(uint2 *dst, u32 *dstIdx, co
                                                      const unsigned activeMask) {
 #if WARP_DST_ATOMICS
   const unsigned lane = threadIdx.x & 31;
-  const unsigned mask = __match_any_sync(activeMask, bucket);
+  const unsigned mask = tari_match_any_sync(activeMask, bucket);
   const unsigned rank = __popc(mask & ((1u << lane) - 1));
   const unsigned count = __popc(mask);
   const unsigned leader = __ffs(mask) - 1;
   u32 base = 0;
   if (lane == leader)
     base = atomicAdd(dstIdx + bucket, count);
-  base = __shfl_sync(mask, base, leader);
+  base = tari_shfl_sync(mask, base, leader);
   const u32 bktIdx = min(base + rank, (u32)(maxOut - 1));
   StoreRoundEdge(dst, bucket * maxOut + bktIdx, edge);
 #else
@@ -563,7 +571,7 @@ __global__ void Round0DstHashDynamic(const uint2 * __restrict__ src, uint2 * __r
       StoreRoundEdge(dst, bucket * maxOut + bktIdx, outEdge);
     }
 #else
-    const unsigned fallbackMask = __ballot_sync(__activemask(), fallback);
+    const unsigned fallbackMask = tari_ballot_sync(tari_activemask(), fallback);
     if (fallback)
       StoreRoundDirectWarp(dst, dstIdx, maxOut, bucket, outEdge, fallbackMask);
 #endif
@@ -677,14 +685,14 @@ __global__ void Round(const uint2 * __restrict__ src, uint2 * __restrict__ dst,
 #if WARP_DST_ATOMICS
           if constexpr (maxIn > EDGES_B/4 || WARP_DST_ATOMICS_LATE) {
           const unsigned lane = threadIdx.x & 31;
-          const unsigned mask = __match_any_sync(__activemask(), bucket);
+          const unsigned mask = tari_match_any_sync(tari_activemask(), bucket);
           const unsigned rank = __popc(mask & ((1u << lane) - 1));
           const unsigned count = __popc(mask);
           const unsigned leader = __ffs(mask) - 1;
           u32 base = 0;
           if (lane == leader)
             base = atomicAdd(dstIdx + bucket, count);
-          base = __shfl_sync(mask, base, leader);
+          base = tari_shfl_sync(mask, base, leader);
           const u32 bktIdx = min(base + rank, (u32)(maxOut - 1));
           StoreRoundEdge(dst, bucket * maxOut + bktIdx, outEdge);
           } else {
@@ -776,14 +784,14 @@ __global__ void RoundMulti(const uint2 * __restrict__ src, uint2 * __restrict__ 
 #if WARP_DST_ATOMICS
           if constexpr (maxIn > EDGES_B/4 || WARP_DST_ATOMICS_LATE) {
           const unsigned lane = threadIdx.x & 31;
-          const unsigned mask = __match_any_sync(__activemask(), bucket);
+          const unsigned mask = tari_match_any_sync(tari_activemask(), bucket);
           const unsigned rank = __popc(mask & ((1u << lane) - 1));
           const unsigned count = __popc(mask);
           const unsigned leader = __ffs(mask) - 1;
           u32 base = 0;
           if (lane == leader)
             base = atomicAdd(dstIdx + bucket, count);
-          base = __shfl_sync(mask, base, leader);
+          base = tari_shfl_sync(mask, base, leader);
           const u32 bktIdx = min(base + rank, (u32)(maxOut - 1));
           StoreRoundEdge(dst, bucket * maxOut + bktIdx, outEdge);
           } else {
@@ -808,6 +816,10 @@ __global__ void RoundMulti(const uint2 * __restrict__ src, uint2 * __restrict__ 
 }
 
 constexpr size_t LATE_ROUND_MULTI_SMEM = MultiCounterWords(LATE_ROUND_BPB) * sizeof(u32);
+#if TARI_GPU_HIP
+static_assert(LATE_ROUND_MULTI_SMEM <= TARI_HIP_MAX_LDS_BYTES,
+              "LATE_ROUND_BPB needs more than the 64 KB of shared memory an AMD workgroup has; use 1, 2 or 4");
+#endif
 #endif
 
 template<int maxIn>
@@ -865,8 +877,8 @@ __global__ void FusedFinalTail(const uint2 * __restrict__ src, uint2 * __restric
       edge = LoadRoundEdge(src, index);
       keep = Read2bCounter(ecounters, edge.y & ZMASK);
     }
-    const unsigned activeMask = __activemask();
-    const unsigned keepMask = __ballot_sync(activeMask, keep);
+    const unsigned activeMask = tari_activemask();
+    const unsigned keepMask = tari_ballot_sync(activeMask, keep);
     if (keep) {
       const unsigned lane = threadIdx.x & 31;
       const unsigned rank = __popc(keepMask & ((1u << lane) - 1));
@@ -875,7 +887,7 @@ __global__ void FusedFinalTail(const uint2 * __restrict__ src, uint2 * __restric
       u32 base = 0;
       if (lane == leader)
         base = atomicAdd(dstIdx, count);
-      base = __shfl_sync(keepMask, base, leader);
+      base = tari_shfl_sync(keepMask, base, leader);
       dst[base + rank] = edge;
     }
   }
@@ -1696,6 +1708,15 @@ CALL_CONVENTION SolverCtx* create_solver_ctx(SolverParams* params) {
 
   cudaDeviceProp prop;
   checkCudaErrors_N(cudaGetDeviceProperties(&prop, params->device));
+#if TARI_GPU_HIP
+  // The kernels use 32-bit lane masks, so only wave32 devices (RDNA) work.
+  if (prop.warpSize != 32) {
+    snprintf(LAST_ERROR_REASON, MAX_NAME_LEN,
+             "device %d (%s, %s) runs %d-lane wavefronts; this build needs 32-lane wavefronts (RDNA2, RDNA3 or RDNA4)",
+             params->device, prop.name, prop.gcnArchName, prop.warpSize);
+    return NULL;
+  }
+#endif
 
   assert(tp.genA.tpb <= prop.maxThreadsPerBlock);
   assert(tp.genB.tpb <= prop.maxThreadsPerBlock);
@@ -1732,12 +1753,12 @@ CALL_CONVENTION void fill_default_params(SolverParams* params) {
   trimparams tp;
   params->device = 0;
   params->ntrims = tp.ntrims;
-  params->genablocks = min(tp.genA.blocks, NEDGES/EDGE_BLOCK_SIZE/tp.genA.tpb);
+  params->genablocks = min((u32)tp.genA.blocks, NEDGES/EDGE_BLOCK_SIZE/tp.genA.tpb);
   params->genatpb = tp.genA.tpb;
   params->genbtpb = tp.genB.tpb;
   params->trimtpb = tp.trim.tpb;
   params->tailtpb = tp.tail.tpb;
-  params->recoverblocks = min(tp.recover.blocks, NEDGES/EDGE_BLOCK_SIZE/tp.recover.tpb);
+  params->recoverblocks = min((u32)tp.recover.blocks, NEDGES/EDGE_BLOCK_SIZE/tp.recover.tpb);
   params->recovertpb = tp.recover.tpb;
   params->cpuload = false;
 }

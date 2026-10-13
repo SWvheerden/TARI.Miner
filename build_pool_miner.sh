@@ -4,6 +4,8 @@ set -euo pipefail
 # Linux build for the LuckyPool-compatible Tari C29 miner.
 # Default sm_86 works with the PATH CUDA 11.5 toolkit and includes PTX for
 # forward JIT. With a newer toolkit, pass NVCC=/path/to/nvcc and sm_89/sm_120.
+# The arch `amd` builds one HIP binary for AMD RDNA2/3/4 GPUs with
+# HIPCC (default hipcc) for every gfx target in AMD_OFFLOAD_ARCHES.
 
 ARCH="${1:-sm_86}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +16,8 @@ CUCKAROO="$CUCKOO_ROOT/src/cuckaroo"
 CRYPTO="$CUCKOO_ROOT/src/crypto"
 NVCC="${NVCC:-nvcc}"
 NVCC_HOST="${NVCC_HOST:-}"
+HIPCC="${HIPCC:-hipcc}"
+AMD_OFFLOAD_ARCHES="${AMD_OFFLOAD_ARCHES:-gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201}"
 XBITS="${XBITS:-7}"
 IDXSHIFT="${IDXSHIFT:-9}"
 MAXRREGCOUNT="${MAXRREGCOUNT:-96}"
@@ -34,6 +38,41 @@ fi
 
 echo "Building tari_c29_pool_miner_linux for $ARCH ..."
 print_arch_flags "$ARCH"
+if [[ "$ARCH" == "amd" ]]; then
+    # HIP build: one fat binary with a code object per gfx target. Wave32 only,
+    # since the kernels use 32-bit lane masks. nvcc's -maxrregcount and -Xptxas
+    # have no HIP equivalent and are dropped.
+    OFFLOAD_FLAGS=()
+    for gfx in $AMD_OFFLOAD_ARCHES; do
+        OFFLOAD_FLAGS+=("--offload-arch=$gfx")
+    done
+    if [[ ${#OFFLOAD_FLAGS[@]} -eq 0 ]]; then
+        echo "AMD_OFFLOAD_ARCHES is empty; name at least one gfx target." >&2
+        exit 2
+    fi
+    echo "AMD offload targets: $AMD_OFFLOAD_ARCHES"
+    OBJ_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tari-c29-amd-build.XXXXXX")"
+    trap 'rm -rf -- "$OBJ_DIR"' EXIT
+    # blake2b-ref.c is C, and clang rejects -std=c++17 for a C input, so it is
+    # compiled on its own. Its object goes first on the next line: hipcc puts
+    # "-x hip" before each .cu and .cpp input, and clang applies -x to every
+    # input after it.
+    "$HIPCC" -O3 -c "$CRYPTO/blake2b-ref.c" -o "$OBJ_DIR/blake2b-ref.o"
+    "$HIPCC" -O3 -std="$STD" -fgpu-default-stream=per-thread -mno-wavefrontsize64 \
+        "${OFFLOAD_FLAGS[@]}" \
+        -DXBITS="$XBITS" -DIDXSHIFT="$IDXSHIFT" -DGRAPH_UNION_SKIP=1 -DRECOVERY_SMALL_OUTPUT=1 -DSEEDA_REHASH=1 \
+        "${EXTRA_FLAGS[@]}" \
+        -I"$ROOT" \
+        -I"$ROOT/compat" \
+        -I"$CUCKAROO" \
+        -I"$CRYPTO" \
+        "$OBJ_DIR/blake2b-ref.o" \
+        "$ROOT/tari_c29_pool_miner.cu" \
+        "$ROOT/tari_c29.cpp" \
+        -o "$OUTPUT"
+    echo "BUILD OK -> $OUTPUT"
+    exit 0
+fi
 "$NVCC" "${HOST_FLAGS[@]}" -O3 -std="$STD" --default-stream per-thread -DXBITS="$XBITS" -DIDXSHIFT="$IDXSHIFT" -DGRAPH_UNION_SKIP=1 -DRECOVERY_SMALL_OUTPUT=1 -DSEEDA_REHASH=1 \
     "${EXTRA_FLAGS[@]}" \
     -maxrregcount="$MAXRREGCOUNT" -Xptxas -flcm=cg \
