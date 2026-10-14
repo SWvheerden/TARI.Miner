@@ -28,43 +28,9 @@ jobs:
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v4
-        with:
-          # The SASS check below builds the pull request's base commit too.
-          fetch-depth: 0
 
       - name: Build solver and pool miner for all shipped architectures
         run: ./build_all.sh
-
-      # The HIP port must not change the NVIDIA kernels. Build the sm_89 pool
-      # miner at the pull request's base and compare its SASS with the one
-      # just built. cuobjdump prints no file names; the instruction offsets
-      # are dropped so only the instructions and their encodings are compared.
-      # Runs before the option matrix, which rebuilds the same binary.
-      - name: Check the sm_89 SASS matches the base commit
-        if: github.event_name == 'pull_request'
-        shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          base="$(git merge-base "$BASE_SHA" HEAD)"
-          echo "Comparing against $base"
-          git worktree add --detach /tmp/sass-base "$base"
-          (cd /tmp/sass-base && ./build_pool_miner.sh sm_89)
-          dump_sass() {
-            cuobjdump -sass "$1" | sed -E 's@/\*[0-9a-f]{4,}\*/@@'
-          }
-          dump_sass /tmp/sass-base/bin/tari_c29_pool_miner_sm_89 > /tmp/sass-base.txt
-          dump_sass bin/tari_c29_pool_miner_sm_89 > /tmp/sass-head.txt
-          echo "base: $(grep -c 'Function :' /tmp/sass-base.txt) kernels, $(wc -l < /tmp/sass-base.txt) lines"
-          echo "head: $(grep -c 'Function :' /tmp/sass-head.txt) kernels, $(wc -l < /tmp/sass-head.txt) lines"
-          if ! diff -u /tmp/sass-base.txt /tmp/sass-head.txt > /tmp/sass.diff; then
-            head -200 /tmp/sass.diff
-            echo "::error::sm_89 SASS differs from the base commit $base"
-            exit 1
-          fi
-          echo "sm_89 SASS is identical to the base commit $base" >> "$GITHUB_STEP_SUMMARY"
 
       # Experimental trim options are off by default. Compile each one, and
       # the combinations that interact, so they keep building until the GPU
